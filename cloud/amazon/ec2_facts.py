@@ -51,6 +51,7 @@ EXAMPLES = '''
    
 import socket
 import re
+import json
 
 socket.setdefaulttimeout(5)
 
@@ -59,6 +60,7 @@ class Ec2Metadata(object):
     ec2_metadata_uri = 'http://169.254.169.254/latest/meta-data/'
     ec2_sshdata_uri  = 'http://169.254.169.254/latest/meta-data/public-keys/0/openssh-key'
     ec2_userdata_uri = 'http://169.254.169.254/latest/user-data/'
+    ec2_dynamic_uri  = 'http://169.254.169.254/latest/dynamic/'
 
     AWS_REGIONS = ('ap-northeast-1',
                    'ap-southeast-1',
@@ -72,11 +74,12 @@ class Ec2Metadata(object):
                    'us-gov-west-1'
                    )
 
-    def __init__(self, module, ec2_metadata_uri=None, ec2_sshdata_uri=None, ec2_userdata_uri=None):
+    def __init__(self, module, ec2_metadata_uri=None, ec2_sshdata_uri=None, ec2_userdata_uri=None, ec2_dynamic_uri=None):
         self.module   = module
         self.uri_meta = ec2_metadata_uri or self.ec2_metadata_uri
         self.uri_user = ec2_userdata_uri or self.ec2_userdata_uri
         self.uri_ssh  =  ec2_sshdata_uri or self.ec2_sshdata_uri
+        self.uri_dyn  =  ec2_dynamic_uri or self.ec2_dynamic_uri
         self._data     = {}
         self._prefix   = 'ansible_ec2_%s'
 
@@ -123,7 +126,12 @@ class Ec2Metadata(object):
                     sg_fields = ",".join(content.split('\n'))
                     self._data['%s' % (new_uri)]  = sg_fields
                 else:
-                    self._data['%s' % (new_uri)] = content
+                    if field == 'document':
+                        decoded = json.loads(content)
+                        for f in decoded:
+                                self._data['%s-%s' % (new_uri, str(f))] = decoded[f]
+                    else:
+                        self._data['%s' % (new_uri)] = content
 
     def fix_invalid_varnames(self, data):
         """Change ':'' and '-' to '_' to ensure valid template variable names"""
@@ -134,13 +142,16 @@ class Ec2Metadata(object):
                 data[newkey] = value
 
     def add_ec2_region(self, data):
-        """Use the 'ansible_ec2_placement_availability_zone' key/value
-        pair to add 'ansible_ec2_placement_region' key/value pair with
-        the EC2 region name.
+        """Use the region from the identity document to add 'ansible_ec2_placement_region'
+        key/value pair with the EC2 region name. Fall back to extracting it from
+        'ansible_ec2_placement_availability_zone' if necessary
         """
+        region = data.get('ansible_ec2_instance_identity_document_region')
+        if region is not None:
+            data['ansible_ec2_placement_region'] = region
+            return
 
-        # Only add a 'ansible_ec2_placement_region' key if the
-        # 'ansible_ec2_placement_availability_zone' exists.
+        # Fall back to 'ansible_ec2_placement_availability_zone' if it exists.
         zone = data.get('ansible_ec2_placement_availability_zone')
         if zone is not None:
             # Use the zone name as the region name unless the zone
@@ -155,6 +166,11 @@ class Ec2Metadata(object):
     def run(self):
         self.fetch(self.uri_meta) # populate _data
         data = self._mangle_fields(self._data, self.uri_meta)
+
+        self._data = {} # clear out accumulated _data, get more
+        self.fetch(self.uri_dyn)
+        data.update(self._mangle_fields(self._data, self.uri_dyn))
+
         data[self._prefix % 'user-data'] = self._fetch(self.uri_user)
         data[self._prefix % 'public-key'] = self._fetch(self.uri_ssh)
         self.fix_invalid_varnames(data)
