@@ -58,7 +58,7 @@ options:
       - if yes, dereferences symlinks and sets/gets attributes on symlink target,
         otherwise acts on symlink itself.
 
-author: Brian Coca
+author: "Brian Coca (@bcoca)"
 '''
 
 EXAMPLES = '''
@@ -73,6 +73,8 @@ EXAMPLES = '''
 '''
 
 import operator
+import re
+import os
 
 def get_xattr_keys(module,path,follow):
     cmd = [ module.get_bin_path('getfattr', True) ]
@@ -124,7 +126,8 @@ def _run_xattr(module,cmd,check_rc=True):
 
     try:
         (rc, out, err) = module.run_command(' '.join(cmd), check_rc=check_rc)
-    except Exception, e:
+    except Exception:
+        e = get_exception()
         module.fail_json(msg="%s!" % e.strerror)
 
     #result = {'raw': out}
@@ -142,9 +145,9 @@ def _run_xattr(module,cmd,check_rc=True):
 def main():
     module = AnsibleModule(
         argument_spec = dict(
-            name = dict(required=True, aliases=['path']),
-            key = dict(required=False, default=None),
-            value = dict(required=False, default=None),
+            name = dict(required=True, aliases=['path'], type='path'),
+            key = dict(required=False, default=None, type='str'),
+            value = dict(required=False, default=None, type='str'),
             state = dict(required=False, default='read', choices=[ 'read', 'present', 'all', 'keys', 'absent' ], type='str'),
             follow = dict(required=False, type='bool', default=True),
         ),
@@ -201,6 +204,7 @@ def main():
     module.exit_json(changed=changed, msg=msg, xattr=res)
 
 # import module snippets
-from ansible.module_utils.basic import *
-
-main()
+from ansible.module_utils.basic import AnsibleModule
+from ansible.module_utils.pycompat24 import get_exception
+if __name__ == '__main__':
+    main()

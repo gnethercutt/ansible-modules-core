@@ -1,5 +1,20 @@
 # this is a virtual module that is entirely implemented server side
 
+# This file is part of Ansible
+#
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+
 DOCUMENTATION = '''
 ---
 module: fetch
@@ -30,7 +45,7 @@ options:
   fail_on_missing:
     version_added: "1.1"
     description:
-      - Makes it fails when the source file is missing.
+      - When set to 'yes', the task will fail if the source file is missing.
     required: false
     choices: [ "yes", "no" ]
     default: "no"
@@ -45,12 +60,21 @@ options:
   flat:
     version_added: "1.2"
     description:
-      - Allows you to override the default behavior of prepending
+      - Allows you to override the default behavior of appending
         hostname/path/to/file to the destination.  If dest ends with '/', it
         will use the basename of the source file, similar to the copy module.
         Obviously this is only handy if the filenames are unique.
 requirements: []
-author: Michael DeHaan
+author: 
+    - "Ansible Core Team"
+    - "Michael DeHaan"
+notes:
+    - When running fetch with C(become), the M(slurp) module will also be
+      used to fetch the contents of the file for determining the remote
+      checksum. This effectively doubles the transfer size, and
+      depending on the file size can consume all available memory on the
+      remote or local hosts causing a C(MemoryError). Due to this it is
+      advisable to run this module without C(become) whenever possible.
 '''
 
 EXAMPLES = '''
@@ -58,11 +82,11 @@ EXAMPLES = '''
 - fetch: src=/tmp/somefile dest=/tmp/fetched
 
 # Specifying a path directly
-- fetch: src=/tmp/somefile dest=/tmp/prefix-{{ ansible_hostname }} flat=yes
+- fetch: src=/tmp/somefile dest=/tmp/prefix-{{ inventory_hostname }} flat=yes
 
 # Specifying a destination path
 - fetch: src=/tmp/uniquefile dest=/tmp/special/ flat=yes
 
 # Storing in a path relative to the playbook
-- fetch: src=/tmp/uniquefile dest=special/prefix-{{ ansible_hostname }} flat=yes
+- fetch: src=/tmp/uniquefile dest=special/prefix-{{ inventory_hostname }} flat=yes
 '''

@@ -29,7 +29,10 @@ options:
       - Indicate desired state of the resource
     choices: ['present', 'absent']
     default: present
-author: Christopher H. Laco, Matt Martz
+    required: false
+author: 
+    - "Christopher H. Laco (@claco)"
+    - "Matt Martz (@sivel)"
 extends_documentation_fragment: rackspace.openstack
 '''
 

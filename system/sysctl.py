@@ -71,15 +71,21 @@ options:
         default: False
 notes: []
 requirements: []
-author: David "DaviXX" CHANIAL <david.chanial@gmail.com>
+author: "David CHANIAL (@davixx) <david.chanial@gmail.com>"
 '''
 
 EXAMPLES = '''
 # Set vm.swappiness to 5 in /etc/sysctl.conf
-- sysctl: name=vm.swappiness value=5 state=present
+- sysctl: 
+    name: vm.swappiness 
+    value: 5
+    state: present
 
 # Remove kernel.panic entry from /etc/sysctl.conf
-- sysctl: name=kernel.panic state=absent sysctl_file=/etc/sysctl.conf
+- sysctl:
+    name: kernel.panic
+    state: absent 
+    sysctl_file: /etc/sysctl.conf
 
 # Set kernel.panic to 3 in /tmp/test_sysctl.conf
 - sysctl: name=kernel.panic value=3 sysctl_file=/tmp/test_sysctl.conf reload=no
@@ -122,6 +128,8 @@ class SysctlModule(object):
     # ==============================================================
 
     def process(self):
+
+        self.platform = get_platform().lower()
 
         # Whitespace is bad
         self.args['name'] = self.args['name'].strip()
@@ -206,7 +214,11 @@ class SysctlModule(object):
 
     # Use the sysctl command to find the current value 
     def get_token_curr_value(self, token):
-        thiscmd = "%s -e -n %s" % (self.sysctl_cmd, token)
+        if self.platform == 'openbsd':
+            # openbsd doesn't support -e, just drop it
+            thiscmd = "%s -n %s" % (self.sysctl_cmd, token)
+        else:
+            thiscmd = "%s -e -n %s" % (self.sysctl_cmd, token)
         rc,out,err = self.module.run_command(thiscmd)    
         if rc != 0:
             return None
@@ -217,7 +229,11 @@ class SysctlModule(object):
     def set_token_value(self, token, value):
         if len(value.split()) > 0:
             value = '"' + value + '"'
-        thiscmd = "%s -w %s=%s" % (self.sysctl_cmd, token, value)
+        if self.platform == 'openbsd':
+            # openbsd doesn't accept -w, but since it's not needed, just drop it
+            thiscmd = "%s %s=%s" % (self.sysctl_cmd, token, value)
+        else:
+            thiscmd = "%s -w %s=%s" % (self.sysctl_cmd, token, value)
         rc,out,err = self.module.run_command(thiscmd)
         if rc != 0:
             self.module.fail_json(msg='setting %s failed: %s' % (token, out + err))
@@ -227,9 +243,20 @@ class SysctlModule(object):
     # Run sysctl -p
     def reload_sysctl(self):
         # do it
-        if get_platform().lower() == 'freebsd':
+        if self.platform == 'freebsd':
             # freebsd doesn't support -p, so reload the sysctl service
             rc,out,err = self.module.run_command('/etc/rc.d/sysctl reload')
+        elif self.platform == 'openbsd':
+            # openbsd doesn't support -p and doesn't have a sysctl service,
+            # so we have to set every value with its own sysctl call
+            for k, v in self.file_values.items():
+                rc = 0
+                if k != self.args['name']:
+                    rc = self.set_token_value(k, v)
+                    if rc != 0:
+                        break
+            if rc == 0 and self.args['state'] == "present":
+                rc = self.set_token_value(self.args['name'], self.args['value'])
         else:
             # system supports reloading via the -p flag to sysctl, so we'll use that
             sysctl_args = [self.sysctl_cmd, '-p', self.sysctl_file]
@@ -254,7 +281,8 @@ class SysctlModule(object):
                 f = open(self.sysctl_file, "r")
                 lines = f.readlines()
                 f.close()
-            except IOError, e:
+            except IOError:
+                e = get_exception()
                 self.module.fail_json(msg="Failed to open %s: %s" % (self.sysctl_file, str(e)))
 
         for line in lines:
@@ -304,7 +332,8 @@ class SysctlModule(object):
         try:
             for l in self.fixed_lines:
                 f.write(l.strip() + "\n")
-        except IOError, e:
+        except IOError:
+            e = get_exception()
             self.module.fail_json(msg="Failed to write to file %s: %s" % (tmp_path, str(e)))
         f.flush()
         f.close()
@@ -322,21 +351,21 @@ def main():
     module = AnsibleModule(
         argument_spec = dict(
             name = dict(aliases=['key'], required=True),
-            value = dict(aliases=['val'], required=False),
+            value = dict(aliases=['val'], required=False, type='str'),
             state = dict(default='present', choices=['present', 'absent']),
             reload = dict(default=True, type='bool'),
             sysctl_set = dict(default=False, type='bool'),
             ignoreerrors = dict(default=False, type='bool'),
-            sysctl_file = dict(default='/etc/sysctl.conf')
+            sysctl_file = dict(default='/etc/sysctl.conf', type='path')
         ),
         supports_check_mode=True
     )
 
-    result = SysctlModule(module)    
+    result = SysctlModule(module)
 
     module.exit_json(changed=result.changed)
-    sys.exit(0)
 
 # import module snippets
 from ansible.module_utils.basic import *
-main()
+if __name__ == '__main__':
+    main()

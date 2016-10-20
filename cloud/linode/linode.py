@@ -40,7 +40,7 @@ options:
   linode_id:
     description:
      - Unique ID of a linode server
-    aliases: lid
+    aliases: [ 'lid' ]
     default: null
     type: integer
   plan:
@@ -88,8 +88,11 @@ options:
     description:
      - how long before wait gives up, in seconds
     default: 300
-requirements: [ "linode-python", "pycurl" ]
-author: Vincent Viallet
+requirements:
+    - "python >= 2.6"
+    - "linode-python"
+    - "pycurl"
+author: "Vincent Viallet (@zbal)"
 notes:
   - LINODE_API_KEY env variable can be used instead
 '''
@@ -151,22 +154,21 @@ EXAMPLES = '''
      state: restarted
 '''
 
-import sys
 import time
 import os
 
 try:
     import pycurl
+    HAS_PYCURL = True
 except ImportError:
-    print("failed=True msg='pycurl required for this module'")
-    sys.exit(1)
+    HAS_PYCURL = False
 
 
 try:
     from linode import api as linode_api
+    HAS_LINODE = True
 except ImportError:
-    print("failed=True msg='linode-python required for this module'")
-    sys.exit(1)
+    HAS_LINODE = False
 
 
 def randompass():
@@ -257,7 +259,7 @@ def linodeServers(module, api, state, name, plan, distribution, datacenter, lino
                 api.linode_update(LinodeId=linode_id, Label='%s_%s' % (linode_id, name))
                 # Save server
                 servers = api.linode_list(LinodeId=linode_id)
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg = '%s' % e.value[0]['ERRORMESSAGE'])
 
         if not disks:
@@ -289,7 +291,7 @@ def linodeServers(module, api, state, name, plan, distribution, datacenter, lino
                                              Label='%s swap disk (lid: %s)' % (name, linode_id), 
                                              Size=swap)
                 jobs.append(res['JobID'])
-            except Exception, e:
+            except Exception as e:
                 # TODO: destroy linode ?
                 module.fail_json(msg = '%s' % e.value[0]['ERRORMESSAGE'])
 
@@ -332,7 +334,7 @@ def linodeServers(module, api, state, name, plan, distribution, datacenter, lino
                 api.linode_config_create(LinodeId=linode_id, KernelId=kernel_id,
                                          Disklist=disks_list, Label='%s config' % name)
                 configs = api.linode_config_list(LinodeId=linode_id)
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg = '%s' % e.value[0]['ERRORMESSAGE'])
 
         # Start / Ensure servers are running
@@ -393,7 +395,7 @@ def linodeServers(module, api, state, name, plan, distribution, datacenter, lino
             if server['STATUS'] != 2:
                 try:
                     res = api.linode_shutdown(LinodeId=linode_id)
-                except Exception, e:
+                except Exception as e:
                     module.fail_json(msg = '%s' % e.value[0]['ERRORMESSAGE'])
                 instance['status'] = 'Stopping'
                 changed = True
@@ -413,7 +415,7 @@ def linodeServers(module, api, state, name, plan, distribution, datacenter, lino
             instance = getInstanceDetails(api, server)
             try:
                 res = api.linode_reboot(LinodeId=server['LINODEID'])
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg = '%s' % e.value[0]['ERRORMESSAGE'])
             instance['status'] = 'Restarting'
             changed = True
@@ -424,7 +426,7 @@ def linodeServers(module, api, state, name, plan, distribution, datacenter, lino
             instance = getInstanceDetails(api, server)
             try:
                 api.linode_delete(LinodeId=server['LINODEID'], skipChecks=True)
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg = '%s' % e.value[0]['ERRORMESSAGE'])
             instance['status'] = 'Deleting'
             changed = True
@@ -441,20 +443,25 @@ def main():
             state = dict(default='present', choices=['active', 'present', 'started',
                                                      'deleted', 'absent', 'stopped',
                                                      'restarted']),
-            api_key = dict(),
+            api_key = dict(no_log=True),
             name = dict(type='str'),
             plan = dict(type='int'),
             distribution = dict(type='int'),
             datacenter = dict(type='int'),
             linode_id = dict(type='int', aliases=['lid']),
             payment_term = dict(type='int', default=1, choices=[1, 12, 24]),
-            password = dict(type='str'),
+            password = dict(type='str', no_log=True),
             ssh_pub_key = dict(type='str'),
             swap = dict(type='int', default=512),
             wait = dict(type='bool', default=True),
             wait_timeout = dict(default=300),
         )
     )
+
+    if not HAS_PYCURL:
+        module.fail_json(msg='pycurl required for this module')
+    if not HAS_LINODE:
+        module.fail_json(msg='linode-python required for this module')
 
     state = module.params.get('state')
     api_key = module.params.get('api_key')
@@ -474,14 +481,14 @@ def main():
     if not api_key:
         try:
             api_key = os.environ['LINODE_API_KEY']
-        except KeyError, e:
+        except KeyError as e:
             module.fail_json(msg = 'Unable to load %s' % e.message)
 
     # setup the auth
     try:
         api = linode_api.Api(api_key)
         api.test_echo()
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = '%s' % e.value[0]['ERRORMESSAGE'])
 
     linodeServers(module, api, state, name, plan, distribution, datacenter, linode_id, 
@@ -490,4 +497,5 @@ def main():
 # import module snippets
 from ansible.module_utils.basic import *
 
-main()
+if __name__ == '__main__':
+    main()

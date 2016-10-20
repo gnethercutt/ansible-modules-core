@@ -1,5 +1,20 @@
 # -*- mode: python -*-
 
+# This file is part of Ansible
+#
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+
 DOCUMENTATION = '''
 ---
 module: pause
@@ -12,12 +27,12 @@ version_added: "0.8"
 options:
   minutes:
     description:
-      - Number of minutes to pause for.
+      - A positive number of minutes to pause for.
     required: false
     default: null
   seconds:
     description:
-      - Number of seconds to pause for.
+      - A positive number of seconds to pause for.
     required: false
     default: null
   prompt:
@@ -25,7 +40,9 @@ options:
       - Optional text to use for the prompt message.
     required: false
     default: null
-author: Tim Bielawa
+author: "Tim Bielawa (@tbielawa)"
+notes:
+      - Starting in 2.2,  if you specify 0 or negative for minutes or seconds, it will wait for 1 second, previously it would wait indefinitely.
 '''
 
 EXAMPLES = '''

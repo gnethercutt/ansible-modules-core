@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # (c) 2012, Michael DeHaan <michael.dehaan@gmail.com>
+# (c) 2016, Toshio Kuratomi <tkuratomi@ansible.com>
 #
 # This file is part of Ansible
 #
@@ -23,37 +24,39 @@ DOCUMENTATION = '''
 ---
 module: ping
 version_added: historical
-short_description: Try to connect to host and return C(pong) on success.
+short_description: Try to connect to host, verify a usable python and return C(pong) on success.
 description:
    - A trivial test module, this module always returns C(pong) on successful
      contact. It does not make sense in playbooks, but it is useful from
-     C(/usr/bin/ansible)
+     C(/usr/bin/ansible) to verify the ability to login and that a usable python is configured.
+   - This is NOT ICMP ping, this is just a trivial test module.
 options: {}
-author: Michael DeHaan
+author:
+    - "Ansible Core Team"
+    - "Michael DeHaan"
 '''
 
 EXAMPLES = '''
-# Test 'webservers' status
+# Test we can logon to 'webservers' and execute python with json lib.
 ansible webservers -m ping
 '''
 
-import exceptions
+from ansible.module_utils.basic import AnsibleModule
 
 def main():
     module = AnsibleModule(
-        argument_spec = dict(
+        argument_spec=dict(
             data=dict(required=False, default=None),
         ),
-        supports_check_mode = True
+        supports_check_mode=True
     )
     result = dict(ping='pong')
     if module.params['data']:
         if module.params['data'] == 'crash':
-            raise exceptions.Exception("boom")
+            raise Exception("boom")
         result['ping'] = module.params['data']
     module.exit_json(**result)
 
-from ansible.module_utils.basic import *
-
-main()
+if __name__ == '__main__':
+    main()
 

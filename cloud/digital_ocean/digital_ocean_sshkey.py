@@ -22,6 +22,7 @@ short_description: Create/delete an SSH key in DigitalOcean
 description:
      - Create/delete an SSH key.
 version_added: "1.6"
+author: "Michael Gregson (@mgregson)"
 options:
   state:
     description:
@@ -46,6 +47,10 @@ options:
 
 notes:
   - Two environment variables can be used, DO_CLIENT_ID and DO_API_KEY.
+  - Version 1 of DigitalOcean API is used.
+requirements:
+  - "python >= 2.6"
+  - dopy
 '''
 
 
@@ -54,33 +59,31 @@ EXAMPLES = '''
 # If a key matches this name, will return the ssh key id and changed = False
 # If no existing key matches this name, a new key is created, the ssh key id is returned and changed = False
 
-- digital_ocean_sshkey: >
-      state=present
-      name=my_ssh_key
-      ssh_pub_key='ssh-rsa AAAA...'
-      client_id=XXX
-      api_key=XXX
+- digital_ocean_sshkey:
+    state: present
+    name: my_ssh_key
+    ssh_pub_key: 'ssh-rsa AAAA...'
+    client_id: XXX
+    api_key: XXX
 
 '''
 
-import sys
 import os
-import time
+import traceback
 
 try:
     from dopy.manager import DoError, DoManager
-except ImportError as e:
-    print "failed=True msg='dopy required for this module'"
-    sys.exit(1)
+    HAS_DOPY = True
+except ImportError:
+    HAS_DOPY = False
 
-class TimeoutError(DoError):
-    def __init__(self, msg, id):
-        super(TimeoutError, self).__init__(msg)
-        self.id = id
+from ansible.module_utils.basic import AnsibleModule
+
 
 class JsonfyMixIn(object):
     def to_json(self):
         return self.__dict__
+
 
 class SSH(JsonfyMixIn):
     manager = None
@@ -117,6 +120,7 @@ class SSH(JsonfyMixIn):
         json = cls.manager.new_ssh_key(name, key_pub)
         return cls(json)
 
+
 def core(module):
     def getkeyordie(k):
         v = module.params[k]
@@ -128,10 +132,9 @@ def core(module):
         # params['client_id'] will be None even if client_id is not passed in
         client_id = module.params['client_id'] or os.environ['DO_CLIENT_ID']
         api_key = module.params['api_key'] or os.environ['DO_API_KEY']
-    except KeyError, e:
+    except KeyError as e:
         module.fail_json(msg='Unable to load %s' % e.message)
 
-    changed = True
     state = module.params['state']
 
     SSH.setup(client_id, api_key)
@@ -150,6 +153,7 @@ def core(module):
         key.destroy()
         module.exit_json(changed=True)
 
+
 def main():
     module = AnsibleModule(
         argument_spec = dict(
@@ -164,15 +168,13 @@ def main():
             ['id', 'name'],
         ),
     )
+    if not HAS_DOPY:
+        module.fail_json(msg='dopy required for this module')
 
     try:
         core(module)
-    except TimeoutError as e:
-        module.fail_json(msg=str(e), id=e.id)
     except (DoError, Exception) as e:
-        module.fail_json(msg=str(e))
+        module.fail_json(msg=str(e), exception=traceback.format_exc())
 
-# import module snippets
-from ansible.module_utils.basic import *
-
-main()
+if __name__ == '__main__':
+    main()

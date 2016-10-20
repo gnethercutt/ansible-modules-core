@@ -18,10 +18,10 @@ DOCUMENTATION = """
 module: ec2_metric_alarm
 short_description: "Create/update or delete AWS Cloudwatch 'metric alarms'"
 description:
- - Can create or delete AWS metric alarms
- - Metrics you wish to alarm on must already exist
+ - Can create or delete AWS metric alarms.
+ - Metrics you wish to alarm on must already exist.
 version_added: "1.6"
-author: Zacharie Eakin
+author: "Zacharie Eakin (@zeekin)"
 options:
     state:
         description:
@@ -29,7 +29,7 @@ options:
         required: true
         choices: ['present', 'absent']
     name:
-        desciption:
+        description:
           - Unique name for the alarm
         required: true
     metric:
@@ -71,7 +71,7 @@ options:
         options: ['Seconds','Microseconds','Milliseconds','Bytes','Kilobytes','Megabytes','Gigabytes','Terabytes','Bits','Kilobits','Megabits','Gigabits','Terabits','Percent','Count','Bytes/Second','Kilobytes/Second','Megabytes/Second','Gigabytes/Second','Terabytes/Second','Bits/Second','Kilobits/Second','Megabits/Second','Gigabits/Second','Terabits/Second','Count/Second','None']
     description:
         description:
-          - A longer desciption of the alarm
+          - A longer description of the alarm
         required: false
     dimensions:
         description:
@@ -89,7 +89,9 @@ options:
         description:
           - A list of the names of action(s) to take when the alarm is in the 'ok' status
         required: false
-extends_documentation_fragment: aws
+extends_documentation_fragment:
+    - aws
+    - ec2
 """
 
 EXAMPLES = '''
@@ -113,18 +115,13 @@ EXAMPLES = '''
 
 '''
 
-import sys
-
-from ansible.module_utils.basic import *
-from ansible.module_utils.ec2 import *
-
 try:
     import boto.ec2.cloudwatch
     from boto.ec2.cloudwatch import CloudWatchConnection, MetricAlarm
     from boto.exception import BotoServerError
+    HAS_BOTO = True
 except ImportError:
-    print "failed=True msg='boto required for this module'"
-    sys.exit(1)
+    HAS_BOTO = False
 
 
 def create_metric_alarm(connection, module):
@@ -168,7 +165,7 @@ def create_metric_alarm(connection, module):
             connection.create_alarm(alm)
             changed = True
             alarms = connection.describe_alarms(alarm_names=[name])
-        except BotoServerError, e:
+        except BotoServerError as e:
             module.fail_json(msg=str(e))
 
     else:
@@ -190,7 +187,7 @@ def create_metric_alarm(connection, module):
         for keys in dim1:
             if not isinstance(dim1[keys], list):
                 dim1[keys] = [dim1[keys]]
-            if dim1[keys] != dim2[keys]:
+            if keys not in dim2 or dim1[keys] != dim2[keys]:
                 changed=True
                 setattr(alarm, 'dimensions', dim1)
 
@@ -203,7 +200,7 @@ def create_metric_alarm(connection, module):
         try:
             if changed:
                 connection.create_alarm(alarm)
-        except BotoServerError, e:
+        except BotoServerError as e:
             module.fail_json(msg=str(e))
     result = alarms[0]
     module.exit_json(changed=changed, name=result.name,
@@ -235,7 +232,7 @@ def delete_metric_alarm(connection, module):
         try:
             connection.delete_alarms([name])
             module.exit_json(changed=True)
-        except BotoServerError, e:
+        except BotoServerError as e:
             module.fail_json(msg=str(e))
     else:
         module.exit_json(changed=False)
@@ -255,28 +252,39 @@ def main():
             unit=dict(type='str', choices=['Seconds', 'Microseconds', 'Milliseconds', 'Bytes', 'Kilobytes', 'Megabytes', 'Gigabytes', 'Terabytes', 'Bits', 'Kilobits', 'Megabits', 'Gigabits', 'Terabits', 'Percent', 'Count', 'Bytes/Second', 'Kilobytes/Second', 'Megabytes/Second', 'Gigabytes/Second', 'Terabytes/Second', 'Bits/Second', 'Kilobits/Second', 'Megabits/Second', 'Gigabits/Second', 'Terabits/Second', 'Count/Second', 'None']),
             evaluation_periods=dict(type='int'),
             description=dict(type='str'),
-            dimensions=dict(type='dict'),
+            dimensions=dict(type='dict', default={}),
             alarm_actions=dict(type='list'),
             insufficient_data_actions=dict(type='list'),
             ok_actions=dict(type='list'),
             state=dict(default='present', choices=['present', 'absent']),
-            region=dict(aliases=['aws_region', 'ec2_region'], choices=AWS_REGIONS),
            )
     )
 
     module = AnsibleModule(argument_spec=argument_spec)
 
+    if not HAS_BOTO:
+        module.fail_json(msg='boto required for this module')
+
     state = module.params.get('state')
 
     region, ec2_url, aws_connect_params = get_aws_connection_info(module)
-    try:
-        connection = connect_to_aws(boto.ec2.cloudwatch, region, **aws_connect_params)
-    except (boto.exception.NoAuthHandlerFound, StandardError), e:
-        module.fail_json(msg=str(e))
+
+    if region:
+        try:
+            connection = connect_to_aws(boto.ec2.cloudwatch, region, **aws_connect_params)
+        except (boto.exception.NoAuthHandlerFound, AnsibleAWSError) as e:
+            module.fail_json(msg=str(e))
+    else:
+        module.fail_json(msg="region must be specified")
 
     if state == 'present':
         create_metric_alarm(connection, module)
     elif state == 'absent':
         delete_metric_alarm(connection, module)
 
-main()
+
+from ansible.module_utils.basic import *
+from ansible.module_utils.ec2 import *
+
+if __name__ == '__main__':
+    main()

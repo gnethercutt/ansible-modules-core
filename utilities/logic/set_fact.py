@@ -20,13 +20,12 @@
 
 DOCUMENTATION = '''
 ---
-author: Dag Wieers
+author: "Dag Wieers (@dagwieers)"
 module: set_fact
 short_description: Set host facts from a task
 description:
-     - This module allows setting new variables.  Variables are set on a host-by-host basis
-       just like facts discovered by the setup module.
-     - These variables will survive between plays.
+     - This module allows setting new variables.  Variables are set on a host-by-host basis just like facts discovered by the setup module.
+     - These variables will be available to subsequent plays during an ansible-playbook run, but will not be saved across executions even if you use a fact cache.
 options:
   key_value:
     description:
@@ -36,16 +35,20 @@ options:
     required: true
     default: null
 version_added: "1.2"
+notes:
+    - "The `var=value` notation can only create strings or booleans.
+      If you want to create lists/arrays or dictionary/hashes use `var: [val1, val2]`"
 '''
 
 EXAMPLES = '''
-# Example setting host facts using key=value pairs
-- set_fact: one_fact="something" other_fact="{{ local_var * 2 }}"
+# Example setting host facts using key=value pairs, note that this always creates strings or booleans
+- set_fact: one_fact="something" other_fact="{{ local_var }}"
 
 # Example setting host facts using complex arguments
 - set_fact:
      one_fact: something
      other_fact: "{{ local_var * 2 }}"
+     another_fact: "{{ some_registered_var.results | map(attribute='ansible_facts.some_fact') | list }}"
 
 # As of 1.8, Ansible will convert boolean strings ('true', 'false', 'yes', 'no')
 # to proper boolean values when using the key=value syntax, however it is still

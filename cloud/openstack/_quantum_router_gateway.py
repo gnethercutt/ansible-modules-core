@@ -22,13 +22,16 @@ try:
     except ImportError:
         from quantumclient.quantum import client
     from keystoneclient.v2_0 import client as ksclient
+    HAVE_DEPS = True
 except ImportError:
-    print("failed=True msg='quantumclient (or neutronclient) and keystone client are required'")
+    HAVE_DEPS = False
+
 DOCUMENTATION = '''
 ---
 module: quantum_router_gateway
 version_added: "1.2"
-deprecated: Deprecated in 1.9. Use os_router_gateway instead
+author: "Benno Joy (@bennojoy)"
+deprecated: Deprecated in 2.0. Use os_router instead
 short_description: set/unset a gateway interface for the router with the specified external network
 description:
    - Creates/Removes a gateway interface from the router, used to associate a external network with a router to route external traffic.
@@ -73,7 +76,10 @@ options:
         - Name of the external network which should be attached to the router.
      required: true
      default: None
-requirements: ["quantumclient", "neutronclient", "keystoneclient"]
+requirements:
+    - "python >= 2.6"
+    - "python-neutronclient or python-quantumclient"
+    - "python-keystoneclient"
 '''
 
 EXAMPLES = '''
@@ -90,7 +96,7 @@ def _get_ksclient(module, kwargs):
                                  password=kwargs.get('login_password'),
                                  tenant_name=kwargs.get('login_tenant_name'),
                                  auth_url=kwargs.get('auth_url'))
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error authenticating to the keystone: %s " % e.message)
     global _os_keystone
     _os_keystone = kclient
@@ -100,7 +106,7 @@ def _get_ksclient(module, kwargs):
 def _get_endpoint(module, ksclient):
     try:
         endpoint = ksclient.service_catalog.url_for(service_type='network', endpoint_type='publicURL')
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error getting network endpoint: %s" % e.message)
     return endpoint
 
@@ -114,7 +120,7 @@ def _get_neutron_client(module, kwargs):
     }
     try:
         neutron = client.Client('2.0', **kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error in connecting to neutron: %s " % e.message)
     return neutron
 
@@ -124,7 +130,7 @@ def _get_router_id(module, neutron):
     }
     try:
         routers = neutron.list_routers(**kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error in getting the router list: %s " % e.message)
     if not routers['routers']:
             return None
@@ -137,7 +143,7 @@ def _get_net_id(neutron, module):
     }
     try:
         networks = neutron.list_networks(**kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json("Error in listing neutron networks: %s" % e.message)
     if not networks['networks']:
         return None
@@ -150,7 +156,7 @@ def _get_port_id(neutron, module, router_id, network_id):
     }
     try:
         ports = neutron.list_ports(**kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json( msg = "Error in listing ports: %s" % e.message)
     if not ports['ports']:
         return None
@@ -162,14 +168,14 @@ def _add_gateway_router(neutron, module, router_id, network_id):
     }
     try:
         neutron.add_gateway_router(router_id, kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error in adding gateway to router: %s" % e.message)
     return True
 
 def  _remove_gateway_router(neutron, module, router_id):
     try:
         neutron.remove_gateway_router(router_id)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error in removing gateway to router: %s" % e.message)
     return True
 
@@ -182,6 +188,8 @@ def main():
             state              = dict(default='present', choices=['absent', 'present']),
     ))
     module = AnsibleModule(argument_spec=argument_spec)
+    if not HAVE_DEPS:
+        module.fail_json(msg='python-keystoneclient and either python-neutronclient or python-quantumclient are required')
 
     neutron = _get_neutron_client(module, module.params)
     router_id = _get_router_id(module, neutron)
@@ -210,5 +218,6 @@ def main():
 # this is magic, see lib/ansible/module.params['common.py
 from ansible.module_utils.basic import *
 from ansible.module_utils.openstack import *
-main()
+if __name__ == '__main__':
+    main()
 

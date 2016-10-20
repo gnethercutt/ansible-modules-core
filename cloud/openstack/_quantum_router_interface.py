@@ -22,16 +22,19 @@ try:
     except ImportError:
         from quantumclient.quantum import client
     from keystoneclient.v2_0 import client as ksclient
+    HAVE_DEPS = True
 except ImportError:
-    print("failed=True msg='quantumclient (or neutronclient) and keystone client are required'")
+    HAVE_DEPS = False
+
 DOCUMENTATION = '''
 ---
 module: quantum_router_interface
-deprecated: Deprecated in 1.9. Use os_router_interface instead
 version_added: "1.2"
-short_description: Attach/Dettach a subnet's interface to a router
+author: "Benno Joy (@bennojoy)"
+deprecated: Deprecated in 2.0. Use os_router instead
+short_description: Attach/Detach a subnet's interface to a router
 description:
-   - Attach/Dettach a subnet interface to a router, to provide a gateway for the subnet.
+   - Attach/Detach a subnet interface to a router, to provide a gateway for the subnet.
 options:
    login_username:
      description:
@@ -78,7 +81,10 @@ options:
         - Name of the tenant whose subnet has to be attached.
      required: false
      default: None
-requirements: ["quantumclient", "keystoneclient"]
+requirements:
+    - "python >= 2.6"
+    - "python-neutronclient or python-quantumclient"
+    - "python-keystoneclient"
 '''
 
 EXAMPLES = '''
@@ -101,7 +107,7 @@ def _get_ksclient(module, kwargs):
                                  password=kwargs.get('login_password'),
                                  tenant_name=kwargs.get('login_tenant_name'),
                                  auth_url=kwargs.get('auth_url'))
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error authenticating to the keystone: %s " % e.message)
     global _os_keystone
     _os_keystone = kclient
@@ -111,7 +117,7 @@ def _get_ksclient(module, kwargs):
 def _get_endpoint(module, ksclient):
     try:
         endpoint = ksclient.service_catalog.url_for(service_type='network', endpoint_type='publicURL')
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error getting network endpoint: %s" % e.message)
     return endpoint
 
@@ -125,24 +131,23 @@ def _get_neutron_client(module, kwargs):
     }
     try:
         neutron = client.Client('2.0', **kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error in connecting to neutron: %s " % e.message)
     return neutron
 
 def _set_tenant_id(module):
     global _os_tenant_id
     if not module.params['tenant_name']:
-        login_tenant_name = module.params['login_tenant_name']
+        _os_tenant_id = _os_keystone.tenant_id
     else:
-        login_tenant_name = module.params['tenant_name']
+        tenant_name = module.params['tenant_name']
 
-    for tenant in _os_keystone.tenants.list():
-        if tenant.name == login_tenant_name:
-            _os_tenant_id = tenant.id
-            break
+        for tenant in _os_keystone.tenants.list():
+            if tenant.name == tenant_name:
+                _os_tenant_id = tenant.id
+                break
     if not _os_tenant_id:
         module.fail_json(msg = "The tenant id cannot be found, please check the parameters")
-
 
 def _get_router_id(module, neutron):
     kwargs = {
@@ -150,7 +155,7 @@ def _get_router_id(module, neutron):
     }
     try:
         routers = neutron.list_routers(**kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error in getting the router list: %s " % e.message)
     if not routers['routers']:
         return None
@@ -165,7 +170,7 @@ def _get_subnet_id(module, neutron):
     }
     try:
         subnets = neutron.list_subnets(**kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json( msg = " Error in getting the subnet list:%s " % e.message)
     if not subnets['subnets']:
         return None
@@ -178,7 +183,7 @@ def _get_port_id(neutron, module, router_id, subnet_id):
     }
     try:
         ports = neutron.list_ports(**kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json( msg = "Error in listing ports: %s" % e.message)
     if not ports['ports']:
         return None
@@ -194,7 +199,7 @@ def _add_interface_router(neutron, module, router_id, subnet_id):
     }
     try:
         neutron.add_interface_router(router_id, kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error in adding interface to router: %s" % e.message)
     return True
 
@@ -204,7 +209,7 @@ def  _remove_interface_router(neutron, module, router_id, subnet_id):
     }
     try:
         neutron.remove_interface_router(router_id, kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg="Error in removing interface from router: %s" % e.message)
     return True
 
@@ -217,6 +222,8 @@ def main():
             state                           = dict(default='present', choices=['absent', 'present']),
     ))
     module = AnsibleModule(argument_spec=argument_spec)
+    if not HAVE_DEPS:
+        module.fail_json(msg='python-keystoneclient and either python-neutronclient or python-quantumclient are required')
 
     neutron = _get_neutron_client(module, module.params)
     _set_tenant_id(module)
@@ -246,5 +253,6 @@ def main():
 # this is magic, see lib/ansible/module.params['common.py
 from ansible.module_utils.basic import *
 from ansible.module_utils.openstack import *
-main()
+if __name__ == '__main__':
+    main()
 

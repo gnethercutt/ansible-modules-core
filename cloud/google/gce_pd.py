@@ -98,6 +98,14 @@ options:
     version_added: "1.6"
     description:
       - path to the pem file associated with the service account email
+        This option is deprecated. Use 'credentials_file'.
+    required: false
+    default: null
+    aliases: []
+  credentials_file:
+    version_added: "2.1.0"
+    description:
+      - path to the JSON file associated with the service account email
     required: false
     default: null
     aliases: []
@@ -117,8 +125,10 @@ options:
     choices: ["pd-standard", "pd-ssd"]
     aliases: []
 
-requirements: [ "libcloud" ]
-author: Eric Johnson <erjohnso@google.com>
+requirements:
+    - "python >= 2.6"
+    - "apache-libcloud >= 0.13.3, >= 0.17.0 if using JSON credentials"
+author: "Eric Johnson (@erjohnso) <erjohnso@google.com>"
 '''
 
 EXAMPLES = '''
@@ -130,18 +140,15 @@ EXAMPLES = '''
     name: pd
 '''
 
-import sys
-
 try:
     from libcloud.compute.types import Provider
     from libcloud.compute.providers import get_driver
     from libcloud.common.google import GoogleBaseError, QuotaExceededError, \
             ResourceExistsError, ResourceNotFoundError, ResourceInUseError
     _ = Provider.GCE
+    HAS_LIBCLOUD = True
 except ImportError:
-    print("failed=True " + \
-        "msg='libcloud with GCE support is required for this module.'")
-    sys.exit(1)
+    HAS_LIBCLOUD = False
 
 
 def main():
@@ -159,9 +166,12 @@ def main():
             zone = dict(default='us-central1-b'),
             service_account_email = dict(),
             pem_file = dict(),
+            credentials_file = dict(),
             project_id = dict(),
         )
     )
+    if not HAS_LIBCLOUD:
+        module.fail_json(msg='libcloud with GCE support (0.17.0+) is required for this module')
 
     gce = gce_connect(module)
 
@@ -208,7 +218,7 @@ def main():
         json_output['size_gb'] = int(disk.size)
     except ResourceNotFoundError:
         pass
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg=unexpected_error_msg(e), changed=False)
 
     # user wants a disk to exist.  If "instance_name" is supplied the user
@@ -249,7 +259,7 @@ def main():
             except QuotaExceededError:
                 module.fail_json(msg='Requested disk size exceeds quota',
                         changed=False)
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg=unexpected_error_msg(e), changed=False)
             json_output['size_gb'] = size_gb
             if image is not None:
@@ -260,7 +270,7 @@ def main():
         if inst and not is_attached:
             try:
                 gce.attach_volume(inst, disk, device=name, ex_mode=mode)
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg=unexpected_error_msg(e), changed=False)
             json_output['attached_to_instance'] = inst.name
             json_output['attached_mode'] = mode
@@ -272,24 +282,24 @@ def main():
         if inst and is_attached:
             try:
                 gce.detach_volume(disk, ex_node=inst)
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg=unexpected_error_msg(e), changed=False)
             changed = True
         if not detach_only:
             try:
                 gce.destroy_volume(disk)
-            except ResourceInUseError, e:
+            except ResourceInUseError as e:
                 module.fail_json(msg=str(e.value), changed=False)
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg=unexpected_error_msg(e), changed=False)
             changed = True
 
     json_output['changed'] = changed
-    print json.dumps(json_output)
-    sys.exit(0)
+    module.exit_json(**json_output)
 
 # import module snippets
 from ansible.module_utils.basic import *
 from ansible.module_utils.gce import *
 
-main()
+if __name__ == '__main__':
+    main()

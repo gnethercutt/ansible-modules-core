@@ -22,14 +22,15 @@ try:
     except ImportError:
         from quantumclient.quantum import client
     from keystoneclient.v2_0 import client as ksclient
+    HAVE_DEPS = True
 except ImportError:
-    print("failed=True msg='quantumclient (or neutronclient) and keystone client are required'")
+    HAVE_DEPS = False
 
 DOCUMENTATION = '''
 ---
 module: quantum_network
 version_added: "1.4"
-deprecated: Deprecated in 1.9. Use os_network instead
+deprecated: Deprecated in 2.0. Use os_network instead
 short_description: Creates/Removes networks from OpenStack
 description:
    - Add or Remove network from OpenStack.
@@ -71,7 +72,7 @@ options:
      default: present
    name:
      description:
-        - Name to be assigned to the nework
+        - Name to be assigned to the network
      required: true
      default: None
    provider_network_type:
@@ -104,7 +105,10 @@ options:
         - Whether the state should be marked as up or down
      required: false
      default: true
-requirements: ["quantumclient", "neutronclient", "keystoneclient"]
+requirements:
+    - "python >= 2.6"
+    - "python-neutronclient or python-quantumclient"
+    - "python-keystoneclient"
 
 '''
 
@@ -129,7 +133,7 @@ def _get_ksclient(module, kwargs):
                                  password=kwargs.get('login_password'),
                                  tenant_name=kwargs.get('login_tenant_name'),
                                  auth_url=kwargs.get('auth_url'))
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error authenticating to the keystone: %s" %e.message)
     global _os_keystone
     _os_keystone = kclient
@@ -139,7 +143,7 @@ def _get_ksclient(module, kwargs):
 def _get_endpoint(module, ksclient):
     try:
         endpoint = ksclient.service_catalog.url_for(service_type='network', endpoint_type='publicURL')
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error getting network endpoint: %s " %e.message)
     return endpoint
 
@@ -153,24 +157,23 @@ def _get_neutron_client(module, kwargs):
     }
     try:
         neutron = client.Client('2.0', **kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = " Error in connecting to neutron: %s " %e.message)
     return neutron
 
 def _set_tenant_id(module):
     global _os_tenant_id
     if not module.params['tenant_name']:
-        tenant_name = module.params['login_tenant_name']
+        _os_tenant_id = _os_keystone.tenant_id
     else:
         tenant_name = module.params['tenant_name']
 
-    for tenant in _os_keystone.tenants.list():
-        if tenant.name == tenant_name:
-            _os_tenant_id = tenant.id
-            break
+        for tenant in _os_keystone.tenants.list():
+            if tenant.name == tenant_name:
+                _os_tenant_id = tenant.id
+                break
     if not _os_tenant_id:
         module.fail_json(msg = "The tenant id cannot be found, please check the parameters")
-
 
 def _get_net_id(neutron, module):
     kwargs = {
@@ -179,7 +182,7 @@ def _get_net_id(neutron, module):
     }
     try:
         networks = neutron.list_networks(**kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error in listing neutron networks: %s" % e.message)
     if not networks['networks']:
         return None
@@ -217,7 +220,7 @@ def _create_network(module, neutron):
 
     try:
         net = neutron.create_network({'network':network})
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error in creating network: %s" % e.message)
     return net['network']['id']
 
@@ -225,7 +228,7 @@ def _delete_network(module, net_id, neutron):
 
     try:
         id = neutron.delete_network(net_id)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error in deleting the network: %s" % e.message)
     return True
 
@@ -244,6 +247,9 @@ def main():
             state                           = dict(default='present', choices=['absent', 'present'])
     ))
     module = AnsibleModule(argument_spec=argument_spec)
+
+    if not HAVE_DEPS:
+        module.fail_json(msg='python-keystoneclient and either python-neutronclient or python-quantumclient are required')
 
     if module.params['provider_network_type'] in ['vlan' , 'flat']:
             if not module.params['provider_physical_network']:
@@ -276,5 +282,6 @@ def main():
 # this is magic, see lib/ansible/module.params['common.py
 from ansible.module_utils.basic import *
 from ansible.module_utils.openstack import *
-main()
+if __name__ == '__main__':
+    main()
 

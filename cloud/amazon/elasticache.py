@@ -22,8 +22,7 @@ description:
   - Manage cache clusters in Amazon Elasticache.
   - Returns information about the specified cache cluster.
 version_added: "1.4"
-requirements: [ "boto" ]
-author: Jim Dalton
+author: "Jim Dalton (@jsdalton)"
 options:
   state:
     description:
@@ -36,14 +35,15 @@ options:
     required: true
   engine:
     description:
-      - Name of the cache engine to be used (memcached or redis)
+      - Name of the cache engine to be used.
     required: false
     default: memcached
+    choices: ['redis', 'memcached']
   cache_engine_version:
     description:
       - The version number of the cache engine
     required: false
-    default: 1.4.14
+    default: None
   node_type:
     description:
       - The compute and memory capacity of the nodes in the cache cluster
@@ -51,24 +51,37 @@ options:
     default: cache.m1.small
   num_nodes:
     description:
-      - The initial number of cache nodes that the cache cluster will have
+      - The initial number of cache nodes that the cache cluster will have. Required when state=present.
     required: false
   cache_port:
     description:
       - The port number on which each of the cache nodes will accept connections
     required: false
-    default: 11211
+    default: None
+  cache_parameter_group:
+    description:
+      - The name of the cache parameter group to associate with this cache cluster. If this argument is omitted, the default cache parameter group for the specified engine will be used.
+    required: false
+    default: None
+    version_added: "2.0"
+    aliases: [ 'parameter_group' ]
+  cache_subnet_group:
+    description:
+      - The subnet group name to associate with. Only use if inside a vpc. Required if inside a vpc
+    required: false
+    default: None
+    version_added: "2.0"
   security_group_ids:
     description:
       - A list of vpc security group names to associate with this cache cluster. Only use if inside a vpc
     required: false
-    default: ['default']
+    default: None
     version_added: "1.6"
   cache_security_groups:
     description:
-      - A list of cache security group names to associate with this cache cluster
+      - A list of cache security group names to associate with this cache cluster. Must be an empty list if inside a vpc
     required: false
-    default: ['default']
+    default: None
   zone:
     description:
       - The EC2 Availability Zone in which the cache cluster will be created
@@ -86,24 +99,9 @@ options:
     required: false
     default: no
     choices: [ "yes", "no" ]
-  aws_secret_key:
-    description:
-      - AWS secret key. If not set then the value of the AWS_SECRET_KEY environment variable is used. 
-    required: false
-    default: None
-    aliases: ['ec2_secret_key', 'secret_key']
-  aws_access_key:
-    description:
-      - AWS access key. If not set then the value of the AWS_ACCESS_KEY environment variable is used.
-    required: false
-    default: None
-    aliases: ['ec2_access_key', 'access_key']
-  region:
-    description:
-      - The AWS region to use. If not specified then the value of the EC2_REGION environment variable, if any, is used.
-    required: false
-    aliases: ['aws_region', 'ec2_region']
-
+extends_documentation_fragment:
+    - aws
+    - ec2
 """
 
 EXAMPLES = """
@@ -137,16 +135,15 @@ EXAMPLES = """
 """
 
 import sys
-import os
 import time
 
 try:
     import boto
     from boto.elasticache.layer1 import ElastiCacheConnection
     from boto.regioninfo import RegionInfo
+    HAS_BOTO = True
 except ImportError:
-    print "failed=True msg='boto required for this module'"
-    sys.exit(1)
+    HAS_BOTO = False
 
 
 class ElastiCacheManager(object):
@@ -155,8 +152,9 @@ class ElastiCacheManager(object):
     EXIST_STATUSES = ['available', 'creating', 'rebooting', 'modifying']
 
     def __init__(self, module, name, engine, cache_engine_version, node_type,
-                 num_nodes, cache_port, cache_security_groups, security_group_ids, zone, wait,
-                 hard_modify, aws_access_key, aws_secret_key, region):
+                 num_nodes, cache_port, cache_parameter_group, cache_subnet_group,
+                 cache_security_groups, security_group_ids, zone, wait,
+                 hard_modify, region, **aws_connect_kwargs):
         self.module = module
         self.name = name
         self.engine = engine
@@ -164,15 +162,16 @@ class ElastiCacheManager(object):
         self.node_type = node_type
         self.num_nodes = num_nodes
         self.cache_port = cache_port
+        self.cache_parameter_group = cache_parameter_group
+        self.cache_subnet_group = cache_subnet_group
         self.cache_security_groups = cache_security_groups
         self.security_group_ids = security_group_ids
         self.zone = zone
         self.wait = wait
         self.hard_modify = hard_modify
 
-        self.aws_access_key = aws_access_key
-        self.aws_secret_key = aws_secret_key
         self.region = region
+        self.aws_connect_kwargs = aws_connect_kwargs
 
         self.changed = False
         self.data = None
@@ -222,12 +221,14 @@ class ElastiCacheManager(object):
                                                       engine_version=self.cache_engine_version,
                                                       cache_security_group_names=self.cache_security_groups,
                                                       security_group_ids=self.security_group_ids,
+                                                      cache_parameter_group_name=self.cache_parameter_group,
+                                                      cache_subnet_group_name=self.cache_subnet_group,
                                                       preferred_availability_zone=self.zone,
                                                       port=self.cache_port)
-        except boto.exception.BotoServerError, e:
+        except boto.exception.BotoServerError as e:
             self.module.fail_json(msg=e.message)
-        cache_cluster_data = response['CreateCacheClusterResponse']['CreateCacheClusterResult']['CacheCluster']
-        self._refresh_data(cache_cluster_data)
+
+        self._refresh_data()
 
         self.changed = True
         if self.wait:
@@ -251,7 +252,7 @@ class ElastiCacheManager(object):
 
         try:
             response = self.conn.delete_cache_cluster(cache_cluster_id=self.name)
-        except boto.exception.BotoServerError, e:
+        except boto.exception.BotoServerError as e:
             self.module.fail_json(msg=e.message)
         cache_cluster_data = response['DeleteCacheClusterResponse']['DeleteCacheClusterResult']['CacheCluster']
         self._refresh_data(cache_cluster_data)
@@ -296,14 +297,14 @@ class ElastiCacheManager(object):
                                                   num_cache_nodes=self.num_nodes,
                                                   cache_node_ids_to_remove=nodes_to_remove,
                                                   cache_security_group_names=self.cache_security_groups,
+                                                  cache_parameter_group_name=self.cache_parameter_group,
                                                   security_group_ids=self.security_group_ids,
                                                   apply_immediately=True,
                                                   engine_version=self.cache_engine_version)
-        except boto.exception.BotoServerError, e:
+        except boto.exception.BotoServerError as e:
             self.module.fail_json(msg=e.message)
 
-        cache_cluster_data = response['ModifyCacheClusterResponse']['ModifyCacheClusterResult']['CacheCluster']
-        self._refresh_data(cache_cluster_data)
+        self._refresh_data()
 
         self.changed = True
         if self.wait:
@@ -328,11 +329,10 @@ class ElastiCacheManager(object):
         try:
             response = self.conn.reboot_cache_cluster(cache_cluster_id=self.name,
                                                       cache_node_ids_to_reboot=cache_node_ids)
-        except boto.exception.BotoServerError, e:
+        except boto.exception.BotoServerError as e:
             self.module.fail_json(msg=e.message)
 
-        cache_cluster_data = response['RebootCacheClusterResponse']['RebootCacheClusterResult']['CacheCluster']
-        self._refresh_data(cache_cluster_data)
+        self._refresh_data()
 
         self.changed = True
         if self.wait:
@@ -382,23 +382,23 @@ class ElastiCacheManager(object):
             'EngineVersion': self.cache_engine_version
         }
         for key, value in modifiable_data.iteritems():
-            if self.data[key] != value:
+            if value is not None and self.data[key] != value:
                 return True
 
         # Check cache security groups
         cache_security_groups = []
         for sg in self.data['CacheSecurityGroups']:
             cache_security_groups.append(sg['CacheSecurityGroupName'])
-            if set(cache_security_groups) - set(self.cache_security_groups):
-                return True
+        if set(cache_security_groups) != set(self.cache_security_groups):
+            return True
 
         # check vpc security groups
         vpc_security_groups = []
         security_groups = self.data['SecurityGroups'] or []
         for sg in security_groups:
             vpc_security_groups.append(sg['SecurityGroupId'])
-            if set(vpc_security_groups) - set(self.security_group_ids):
-                return True
+        if set(vpc_security_groups) != set(self.security_group_ids):
+            return True
 
         return False
 
@@ -415,7 +415,7 @@ class ElastiCacheManager(object):
         if self.zone is not None:
             unmodifiable_data['zone'] = self.data['PreferredAvailabilityZone']
         for key, value in unmodifiable_data.iteritems():
-            if getattr(self, key) != value:
+            if getattr(self, key) is not None and getattr(self, key) != value:
                 return True
         return False
 
@@ -424,10 +424,11 @@ class ElastiCacheManager(object):
         try:
             endpoint = "elasticache.%s.amazonaws.com" % self.region
             connect_region = RegionInfo(name=self.region, endpoint=endpoint)
-            return ElastiCacheConnection(aws_access_key_id=self.aws_access_key,
-                                         aws_secret_access_key=self.aws_secret_key,
-                                         region=connect_region)
-        except boto.exception.NoAuthHandlerFound, e:
+            return ElastiCacheConnection(
+                region=connect_region,
+                **self.aws_connect_kwargs
+            )
+        except boto.exception.NoAuthHandlerFound as e:
             self.module.fail_json(msg=e.message)
 
     def _get_port(self):
@@ -441,6 +442,7 @@ class ElastiCacheManager(object):
 
     def _refresh_data(self, cache_cluster_data=None):
         """Refresh data about this cache cluster"""
+
         if cache_cluster_data is None:
             try:
                 response = self.conn.describe_cache_clusters(cache_cluster_id=self.name,
@@ -473,24 +475,24 @@ class ElastiCacheManager(object):
         return cache_node_ids[-num_nodes_to_remove:]
 
 
-
 def main():
     argument_spec = ec2_argument_spec()
     argument_spec.update(dict(
-            state={'required': True, 'choices': ['present', 'absent', 'rebooted']},
-            name={'required': True},
-            engine={'required': False, 'default': 'memcached'},
-            cache_engine_version={'required': False, 'default': '1.4.14'},
-            node_type={'required': False, 'default': 'cache.m1.small'},
-            num_nodes={'required': False, 'default': None, 'type': 'int'},
-            cache_port={'required': False, 'default': 11211, 'type': 'int'},
-            cache_security_groups={'required': False, 'default': ['default'],
-                                   'type': 'list'},
-            security_group_ids={'required': False, 'default': [],
-                                   'type': 'list'},
-            zone={'required': False, 'default': None},
-            wait={'required': False, 'type' : 'bool', 'default': True},
-            hard_modify={'required': False, 'type': 'bool', 'default': False}
+            state                 ={'required': True, 'choices': ['present', 'absent', 'rebooted']},
+            name                  ={'required': True},
+            engine                ={'required': False, 'default': 'memcached'},
+            cache_engine_version  ={'required': False},
+            node_type             ={'required': False, 'default': 'cache.m1.small'},
+            num_nodes             ={'required': False, 'default': None, 'type': 'int'},
+            # alias for compat with the original PR 1950
+            cache_parameter_group ={'required': False, 'default': None, 'aliases': ['parameter_group']},
+            cache_port            ={'required': False, 'type': 'int'},
+            cache_subnet_group    ={'required': False, 'default': None},
+            cache_security_groups ={'required': False, 'default': [], 'type': 'list'},
+            security_group_ids    ={'required': False, 'default': [], 'type': 'list'},
+            zone                  ={'required': False, 'default': None},
+            wait                  ={'required': False, 'type' : 'bool', 'default': True},
+            hard_modify           ={'required': False, 'type': 'bool', 'default': False}
         )
     )
 
@@ -498,7 +500,10 @@ def main():
         argument_spec=argument_spec,
     )
 
-    ec2_url, aws_access_key, aws_secret_key, region = get_ec2_creds(module)
+    if not HAS_BOTO:
+        module.fail_json(msg='boto required for this module')
+
+    region, ec2_url, aws_connect_kwargs = get_aws_connection_info(module)
 
     name = module.params['name']
     state = module.params['state']
@@ -507,25 +512,31 @@ def main():
     node_type = module.params['node_type']
     num_nodes = module.params['num_nodes']
     cache_port = module.params['cache_port']
+    cache_subnet_group = module.params['cache_subnet_group']
     cache_security_groups = module.params['cache_security_groups']
     security_group_ids = module.params['security_group_ids']
     zone = module.params['zone']
     wait = module.params['wait']
     hard_modify = module.params['hard_modify']
+    cache_parameter_group = module.params['cache_parameter_group']
+
+    if cache_subnet_group and cache_security_groups:
+        module.fail_json(msg="Can't specify both cache_subnet_group and cache_security_groups")
 
     if state == 'present' and not num_nodes:
         module.fail_json(msg="'num_nodes' is a required parameter. Please specify num_nodes > 0")
 
     if not region:
-        module.fail_json(msg=str("Either region or EC2_REGION environment variable must be set."))
+        module.fail_json(msg=str("Either region or AWS_REGION or EC2_REGION environment variable or boto config aws_region or ec2_region must be set."))
 
     elasticache_manager = ElastiCacheManager(module, name, engine,
                                              cache_engine_version, node_type,
                                              num_nodes, cache_port,
+                                             cache_parameter_group,
+                                             cache_subnet_group,
                                              cache_security_groups,
                                              security_group_ids, zone, wait,
-                                             hard_modify, aws_access_key,
-                                             aws_secret_key, region)
+                                             hard_modify, region, **aws_connect_kwargs)
 
     if state == 'present':
         elasticache_manager.ensure_present()

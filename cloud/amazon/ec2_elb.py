@@ -25,7 +25,7 @@ description:
     if state=absent is passed as an argument.
   - Will be marked changed when called only if there are ELBs found to operate on.
 version_added: "1.2"
-author: John Jarvis
+author: "John Jarvis (@jarv)"
 options:
   state:
     description:
@@ -41,11 +41,6 @@ options:
       - List of ELB names, required for registration. The ec2_elbs fact should be used if there was a previous de-register.
     required: false
     default: None
-  region:
-    description:
-      - The AWS region to use. If not specified then the value of the EC2_REGION environment variable, if any, is used.
-    required: false
-    aliases: ['aws_region', 'ec2_region']
   enable_availability_zone:
     description:
       - Whether to enable the availability zone of the instance on the target ELB if the availability zone has not already
@@ -55,10 +50,10 @@ options:
     choices: [ "yes", "no" ]
   wait:
     description:
-      - Wait for instance registration or deregistration to complete successfully before returning.  
+      - Wait for instance registration or deregistration to complete successfully before returning.
     required: false
     default: yes
-    choices: [ "yes", "no" ] 
+    choices: [ "yes", "no" ]
   validate_certs:
     description:
       - When set to "no", SSL certificates will not be validated for boto versions >= 2.6.0.
@@ -73,7 +68,9 @@ options:
     required: false
     default: 0
     version_added: "1.6"
-extends_documentation_fragment: aws
+extends_documentation_fragment:
+    - aws
+    - ec2
 """
 
 EXAMPLES = """
@@ -85,31 +82,31 @@ pre_tasks:
     local_action:
       module: ec2_elb
       instance_id: "{{ ansible_ec2_instance_id }}"
-      state: 'absent'
+      state: absent
 roles:
   - myrole
 post_tasks:
   - name: Instance Register
-    local_action: 
+    local_action:
       module: ec2_elb
       instance_id: "{{ ansible_ec2_instance_id }}"
       ec2_elbs: "{{ item }}"
-      state: 'present'
+      state: present
     with_items: ec2_elbs
 """
 
 import time
-import sys
-import os
 
 try:
     import boto
     import boto.ec2
+    import boto.ec2.autoscale
     import boto.ec2.elb
     from boto.regioninfo import RegionInfo
+    HAS_BOTO = True
 except ImportError:
-    print "failed=True msg='boto required for this module'"
-    sys.exit(1)
+    HAS_BOTO = False
+
 
 class ElbManager:
     """Handles EC2 instance ELB registration and de-registration"""
@@ -130,9 +127,9 @@ class ElbManager:
         for lb in self.lbs:
             initial_state = self._get_instance_health(lb) 
             if initial_state is None:
-                # The instance isn't registered with this ELB so just 
-                # return unchanged
-                return
+                # Instance isn't registered with this load
+                # balancer. Ignore it and try the next one.
+                continue
 
             lb.deregister_instances([self.instance_id])
 
@@ -207,7 +204,7 @@ class ElbManager:
                     self.changed = True
                 break
             elif self._is_instance_state_pending(instance_state):
-                # If it's pending, we'll skip further checks andd continue waiting
+                # If it's pending, we'll skip further checks and continue waiting
                 pass
             elif (awaited_state == 'InService'
                   and instance_state.reason_code == "Instance"
@@ -215,7 +212,7 @@ class ElbManager:
                 # If the reason_code for the instance being out of service is
                 # "Instance" this indicates a failure state, e.g. the instance
                 # has failed a health check or the ELB does not have the
-                # instance's availabilty zone enabled. The exact reason why is
+                # instance's availability zone enabled. The exact reason why is
                 # described in InstantState.description.
                 msg = ("The instance %s could not be put in service on %s."
                        " Reason: %s")
@@ -242,7 +239,7 @@ class ElbManager:
         """
         try:
             status = lb.get_instance_health([self.instance_id])[0]
-        except boto.exception.BotoServerError, e:
+        except boto.exception.BotoServerError as e:
             if e.error_code == 'InvalidInstance':
                 return None
             else:
@@ -255,13 +252,27 @@ class ElbManager:
                   for elb lookup instead of returning what elbs
                   are attached to self.instance_id"""
 
+        if not ec2_elbs:
+           ec2_elbs = self._get_auto_scaling_group_lbs()
+
         try:
-            elb = connect_to_aws(boto.ec2.elb, self.region, 
-                                 **self.aws_connect_params)
-        except (boto.exception.NoAuthHandlerFound, StandardError), e:
+            elb = connect_to_aws(boto.ec2.elb, self.region, **self.aws_connect_params)
+        except (boto.exception.NoAuthHandlerFound, AnsibleAWSError) as e:
             self.module.fail_json(msg=str(e))
 
-        elbs = elb.get_all_load_balancers()
+        elbs = []
+        marker = None
+        while True:
+            try:
+                newelbs = elb.get_all_load_balancers(marker=marker)
+                marker = newelbs.next_marker
+                elbs.extend(newelbs)
+                if not marker:
+                    break
+            except TypeError:
+                # Older version of boto do not allow for params
+                elbs = elb.get_all_load_balancers()
+                break
 
         if ec2_elbs:
             lbs = sorted(lb for lb in elbs if lb.name in ec2_elbs)
@@ -273,12 +284,37 @@ class ElbManager:
                         lbs.append(lb)
         return lbs
 
+    def _get_auto_scaling_group_lbs(self):
+        """Returns a list of ELBs associated with self.instance_id
+           indirectly through its auto scaling group membership"""
+
+        try:
+           asg = connect_to_aws(boto.ec2.autoscale, self.region, **self.aws_connect_params)
+        except (boto.exception.NoAuthHandlerFound, AnsibleAWSError) as e:
+            self.module.fail_json(msg=str(e))
+
+        asg_instances = asg.get_all_autoscaling_instances([self.instance_id])
+        if len(asg_instances) > 1:
+           self.module.fail_json(msg="Illegal state, expected one auto scaling group instance.")
+
+        if not asg_instances:
+           asg_elbs = []
+        else:
+           asg_name = asg_instances[0].group_name
+
+           asgs = asg.get_all_groups([asg_name])
+           if len(asg_instances) != 1:
+              self.module.fail_json(msg="Illegal state, expected one auto scaling group.")
+
+           asg_elbs = asgs[0].load_balancers
+
+        return asg_elbs
+
     def _get_instance(self):
         """Returns a boto.ec2.InstanceObject for self.instance_id"""
         try:
-            ec2 = connect_to_aws(boto.ec2, self.region, 
-                                 **self.aws_connect_params)
-        except (boto.exception.NoAuthHandlerFound, StandardError), e:
+            ec2 = connect_to_aws(boto.ec2, self.region, **self.aws_connect_params)
+        except (boto.exception.NoAuthHandlerFound, AnsibleAWSError) as e:
             self.module.fail_json(msg=str(e))
         return ec2.get_only_instances(instance_ids=[self.instance_id])[0]
 
@@ -291,7 +327,7 @@ def main():
             ec2_elbs={'default': None, 'required': False, 'type':'list'},
             enable_availability_zone={'default': True, 'required': False, 'type': 'bool'},
             wait={'required': False, 'default': True, 'type': 'bool'},
-            wait_timeout={'requred': False, 'default': 0, 'type': 'int'}
+            wait_timeout={'required': False, 'default': 0, 'type': 'int'}
         )
     )
 
@@ -299,9 +335,12 @@ def main():
         argument_spec=argument_spec,
     )
 
+    if not HAS_BOTO:
+        module.fail_json(msg='boto required for this module')
+
     region, ec2_url, aws_connect_params = get_aws_connection_info(module)
 
-    if not region: 
+    if not region:
         module.fail_json(msg="Region must be specified as a parameter, in EC2_REGION or AWS_REGION environment variables or in boto configuration file")
 
     ec2_elbs = module.params['ec2_elbs']
@@ -313,8 +352,7 @@ def main():
         module.fail_json(msg="ELBs are required for registration")
 
     instance_id = module.params['instance_id']
-    elb_man = ElbManager(module, instance_id, ec2_elbs, 
-                         region=region, **aws_connect_params)
+    elb_man = ElbManager(module, instance_id, ec2_elbs, region=region, **aws_connect_params)
 
     if ec2_elbs is not None:
         for elb in ec2_elbs:
@@ -336,4 +374,5 @@ def main():
 from ansible.module_utils.basic import *
 from ansible.module_utils.ec2 import *
 
-main()
+if __name__ == '__main__':
+    main()

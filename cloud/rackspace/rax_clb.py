@@ -103,7 +103,9 @@ options:
     description:
       - how long before wait gives up, in seconds
     default: 300
-author: Christopher H. Laco, Matt Martz
+author: 
+    - "Christopher H. Laco (@claco)"
+    - "Matt Martz (@sivel)"
 extends_documentation_fragment: rackspace
 '''
 
@@ -180,7 +182,7 @@ def cloud_load_balancer(module, state, name, meta, algorithm, port, protocol,
                                       algorithm=algorithm, protocol=protocol,
                                       timeout=timeout, virtual_ips=virtual_ips)
                 changed = True
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg='%s' % e.message)
         else:
             balancer = balancers[0]
@@ -238,7 +240,7 @@ def cloud_load_balancer(module, state, name, meta, algorithm, port, protocol,
             try:
                 balancer.delete()
                 changed = True
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg='%s' % e.message)
 
             instance = rax_to_dict(balancer, 'clb')

@@ -27,28 +27,33 @@ import shlex
 import os
 import subprocess
 import sys
-import datetime
 import traceback
 import signal
 import time
 import syslog
 
+PY3 = sys.version_info[0] == 3
+
+syslog.openlog('ansible-%s' % os.path.basename(__file__))
+syslog.syslog(syslog.LOG_NOTICE, 'Invoked with %s' % " ".join(sys.argv[1:]))
+
+def notice(msg):
+    syslog.syslog(syslog.LOG_NOTICE, msg)
+
 def daemonize_self():
     # daemonizing code: http://aspn.activestate.com/ASPN/Cookbook/Python/Recipe/66012
-    # logger.info("cobblerd started")
     try:
         pid = os.fork()
         if pid > 0:
             # exit first parent
             sys.exit(0)
-    except OSError, e:
-        print >>sys.stderr, "fork #1 failed: %d (%s)" % (e.errno, e.strerror)
-        sys.exit(1)
+    except OSError:
+        e = sys.exc_info()[1]
+        sys.exit("fork #1 failed: %d (%s)\n" % (e.errno, e.strerror))
 
-    # decouple from parent environment
-    os.chdir("/")
+    # decouple from parent environment (does not chdir / to keep the directory context the same as for non async tasks)
     os.setsid()
-    os.umask(022)
+    os.umask(int('022', 8))
 
     # do second fork
     try:
@@ -56,145 +61,224 @@ def daemonize_self():
         if pid > 0:
             # print "Daemon PID %d" % pid
             sys.exit(0)
-    except OSError, e:
-        print >>sys.stderr, "fork #2 failed: %d (%s)" % (e.errno, e.strerror)
-        sys.exit(1)
+    except OSError:
+        e = sys.exc_info()[1]
+        sys.exit("fork #2 failed: %d (%s)\n" % (e.errno, e.strerror))
 
-    dev_null = file('/dev/null','rw')
+    dev_null = open('/dev/null', 'w')
     os.dup2(dev_null.fileno(), sys.stdin.fileno())
     os.dup2(dev_null.fileno(), sys.stdout.fileno())
     os.dup2(dev_null.fileno(), sys.stderr.fileno())
 
-if len(sys.argv) < 3:
-    print json.dumps({
-        "failed" : True,
-        "msg"    : "usage: async_wrapper <jid> <time_limit> <modulescript> <argsfile>.  Humans, do not call directly!"
-    })
-    sys.exit(1)
+# NB: this function copied from module_utils/json_utils.py. Ensure any changes are propagated there.
+# FUTURE: AnsibleModule-ify this module so it's Ansiballz-compatible and can use the module_utils copy of this function.
+def _filter_non_json_lines(data):
+    '''
+    Used to filter unrelated output around module JSON output, like messages from
+    tcagetattr, or where dropbear spews MOTD on every single command (which is nuts).
 
-jid = "%s.%d" % (sys.argv[1], os.getpid())
-time_limit = sys.argv[2]
-wrapped_module = sys.argv[3]
-argsfile = sys.argv[4]
-cmd = "%s %s" % (wrapped_module, argsfile)
+    Filters leading lines before first line-starting occurrence of '{' or '[', and filter all
+    trailing lines after matching close character (working from the bottom of output).
+    '''
+    warnings = []
 
-syslog.openlog('ansible-%s' % os.path.basename(__file__))
-syslog.syslog(syslog.LOG_NOTICE, 'Invoked with %s' % " ".join(sys.argv[1:]))
+    # Filter initial junk
+    lines = data.splitlines()
 
-# setup logging directory
-logdir = os.path.expanduser("~/.ansible_async")
-log_path = os.path.join(logdir, jid)
+    for start, line in enumerate(lines):
+        line = line.strip()
+        if line.startswith(u'{'):
+            endchar = u'}'
+            break
+        elif line.startswith(u'['):
+            endchar = u']'
+            break
+    else:
+        raise ValueError('No start of json char found')
 
-if not os.path.exists(logdir):
-    try:
-        os.makedirs(logdir)
-    except:
-        print json.dumps({
-            "failed" : 1,
-            "msg" : "could not create: %s" % logdir
-        })
+    # Filter trailing junk
+    lines = lines[start:]
 
-def _run_command(wrapped_cmd, jid, log_path):
+    for reverse_end_offset, line in enumerate(reversed(lines)):
+        if line.strip().endswith(endchar):
+            break
+    else:
+        raise ValueError('No end of json char found')
 
-    logfile = open(log_path, "w")
-    logfile.write(json.dumps({ "started" : 1, "ansible_job_id" : jid }))
-    logfile.close()
-    logfile = open(log_path, "w")
+    if reverse_end_offset > 0:
+        # Trailing junk is uncommon and can point to things the user might
+        # want to change.  So print a warning if we find any
+        trailing_junk = lines[len(lines) - reverse_end_offset:]
+        warnings.append('Module invocation had junk after the JSON data: %s' % '\n'.join(trailing_junk))
+
+    lines = lines[:(len(lines) - reverse_end_offset)]
+
+    return ('\n'.join(lines), warnings)
+
+def _run_module(wrapped_cmd, jid, job_path):
+
+    tmp_job_path = job_path + ".tmp"
+    jobfile = open(tmp_job_path, "w")
+    jobfile.write(json.dumps({ "started" : 1, "finished" : 0, "ansible_job_id" : jid }))
+    jobfile.close()
+    os.rename(tmp_job_path, job_path)
+    jobfile = open(tmp_job_path, "w")
     result = {}
 
     outdata = ''
+    filtered_outdata = ''
+    stderr = ''
     try:
         cmd = shlex.split(wrapped_cmd)
-        script = subprocess.Popen(cmd, shell=False,
-            stdin=None, stdout=logfile, stderr=logfile)
-        script.communicate()
-        outdata = file(log_path).read()
-        result = json.loads(outdata)
+        script = subprocess.Popen(cmd, shell=False, stdin=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        (outdata, stderr) = script.communicate()
+        if PY3:
+            outdata = outdata.decode('utf-8', 'surrogateescape')
+            stderr = stderr.decode('utf-8', 'surrogateescape')
 
-    except (OSError, IOError), e:
+        (filtered_outdata, json_warnings) = _filter_non_json_lines(outdata)
+
+        result = json.loads(filtered_outdata)
+
+        if json_warnings:
+            # merge JSON junk warnings with any existing module warnings
+            module_warnings = result.get('warnings', [])
+            if type(module_warnings) is not list:
+                module_warnings = [module_warnings]
+            module_warnings.extend(json_warnings)
+            result['warnings'] = module_warnings
+
+        if stderr:
+            result['stderr'] = stderr
+        jobfile.write(json.dumps(result))
+
+    except (OSError, IOError):
+        e = sys.exc_info()[1]
         result = {
             "failed": 1,
             "cmd" : wrapped_cmd,
             "msg": str(e),
+            "outdata": outdata, # temporary notice only
+            "stderr": stderr
         }
         result['ansible_job_id'] = jid
-        logfile.write(json.dumps(result))
-    except:
+        jobfile.write(json.dumps(result))
+
+    except (ValueError, Exception):
         result = {
             "failed" : 1,
             "cmd" : wrapped_cmd,
-            "data" : outdata, # temporary debug only
+            "data" : outdata, # temporary notice only
+            "stderr": stderr,
             "msg" : traceback.format_exc()
         }
         result['ansible_job_id'] = jid
-        logfile.write(json.dumps(result))
-    logfile.close()
+        jobfile.write(json.dumps(result))
 
-# immediately exit this process, leaving an orphaned process
-# running which immediately forks a supervisory timing process
+    jobfile.close()
+    os.rename(tmp_job_path, job_path)
 
-#import logging
-#import logging.handlers
 
-#logger = logging.getLogger("ansible_async")
-#logger.setLevel(logging.WARNING)
-#logger.addHandler( logging.handlers.SysLogHandler("/dev/log") )
-def debug(msg):
-    #logger.warning(msg)
-    pass
+####################
+##      main      ##
+####################
+if __name__ == '__main__':
 
-try:
-    pid = os.fork()
-    if pid:
-        # Notify the overlord that the async process started
+    if len(sys.argv) < 5:
+        print(json.dumps({
+            "failed" : True,
+            "msg"    : "usage: async_wrapper <jid> <time_limit> <modulescript> <argsfile>.  Humans, do not call directly!"
+        }))
+        sys.exit(1)
 
-        # we need to not return immmediately such that the launched command has an attempt
-        # to initialize PRIOR to ansible trying to clean up the launch directory (and argsfile)
-        # this probably could be done with some IPC later.  Modules should always read
-        # the argsfile at the very first start of their execution anyway
-        time.sleep(1)
-        debug("Return async_wrapper task started.")
-        print json.dumps({ "started" : 1, "ansible_job_id" : jid, "results_file" : log_path })
-        sys.stdout.flush()
-        sys.exit(0)
+    jid = "%s.%d" % (sys.argv[1], os.getpid())
+    time_limit = sys.argv[2]
+    wrapped_module = sys.argv[3]
+    argsfile = sys.argv[4]
+    # consider underscore as no argsfile so we can support passing of additional positional parameters
+    if argsfile != '_':
+        cmd = "%s %s" % (wrapped_module, argsfile)
     else:
-        # The actual wrapper process
+        cmd = wrapped_module
+    step = 5
 
-        # Daemonize, so we keep on running
-        daemonize_self()
+    # setup job output directory
+    jobdir = os.path.expanduser("~/.ansible_async")
+    job_path = os.path.join(jobdir, jid)
 
-        # we are now daemonized, create a supervisory process
-        debug("Starting module and watcher")
+    if not os.path.exists(jobdir):
+        try:
+            os.makedirs(jobdir)
+        except:
+            print(json.dumps({
+                "failed" : 1,
+                "msg" : "could not create: %s" % jobdir
+            }))
+    # immediately exit this process, leaving an orphaned process
+    # running which immediately forks a supervisory timing process
 
-        sub_pid = os.fork()
-        if sub_pid:
-            # the parent stops the process after the time limit
-            remaining = int(time_limit)
+    try:
+        pid = os.fork()
+        if pid:
+            # Notify the overlord that the async process started
 
-            # set the child process group id to kill all children
-            os.setpgid(sub_pid, sub_pid)
-
-            debug("Start watching %s (%s)"%(sub_pid, remaining))
-            time.sleep(5)
-            while os.waitpid(sub_pid, os.WNOHANG) == (0, 0):
-                debug("%s still running (%s)"%(sub_pid, remaining))
-                time.sleep(5)
-                remaining = remaining - 5
-                if remaining <= 0:
-                    debug("Now killing %s"%(sub_pid))
-                    os.killpg(sub_pid, signal.SIGKILL)
-                    debug("Sent kill to group %s"%sub_pid)
-                    time.sleep(1)
-                    sys.exit(0)
-            debug("Done in kid B.")
-            os._exit(0)
-        else:
-            # the child process runs the actual module
-            debug("Start module (%s)"%os.getpid())
-            _run_command(cmd, jid, log_path)
-            debug("Module complete (%s)"%os.getpid())
+            # we need to not return immediately such that the launched command has an attempt
+            # to initialize PRIOR to ansible trying to clean up the launch directory (and argsfile)
+            # this probably could be done with some IPC later.  Modules should always read
+            # the argsfile at the very first start of their execution anyway
+            notice("Return async_wrapper task started.")
+            print(json.dumps({ "started" : 1, "finished" : 0, "ansible_job_id" : jid, "results_file" : job_path }))
+            sys.stdout.flush()
+            time.sleep(1)
             sys.exit(0)
+        else:
+            # The actual wrapper process
 
-except Exception, err:
-    debug("error: %s"%(err))
-    raise err
+            # Daemonize, so we keep on running
+            daemonize_self()
+
+            # we are now daemonized, create a supervisory process
+            notice("Starting module and watcher")
+
+            sub_pid = os.fork()
+            if sub_pid:
+                # the parent stops the process after the time limit
+                remaining = int(time_limit)
+
+                # set the child process group id to kill all children
+                os.setpgid(sub_pid, sub_pid)
+
+                notice("Start watching %s (%s)"%(sub_pid, remaining))
+                time.sleep(step)
+                while os.waitpid(sub_pid, os.WNOHANG) == (0, 0):
+                    notice("%s still running (%s)"%(sub_pid, remaining))
+                    time.sleep(step)
+                    remaining = remaining - step
+                    if remaining <= 0:
+                        notice("Now killing %s"%(sub_pid))
+                        os.killpg(sub_pid, signal.SIGKILL)
+                        notice("Sent kill to group %s"%sub_pid)
+                        time.sleep(1)
+                        sys.exit(0)
+                notice("Done in kid B.")
+                sys.exit(0)
+            else:
+                # the child process runs the actual module
+                notice("Start module (%s)"%os.getpid())
+                _run_module(cmd, jid, job_path)
+                notice("Module complete (%s)"%os.getpid())
+                sys.exit(0)
+
+    except SystemExit:
+        # On python2.4, SystemExit is a subclass of Exception.
+        # This block makes python2.4 behave the same as python2.5+
+        raise
+
+    except Exception:
+        e = sys.exc_info()[1]
+        notice("error: %s"%(e))
+        print(json.dumps({
+            "failed" : True,
+            "msg"    : "FATAL ERROR: %s" % str(e)
+        }))
+        sys.exit(1)

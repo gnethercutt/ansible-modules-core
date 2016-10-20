@@ -1,4 +1,18 @@
 #!/usr/bin/python
+# This file is part of Ansible
+#
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 
 DOCUMENTATION = """
 module: ec2_scaling_policy
@@ -7,7 +21,7 @@ description:
   - Can create or delete scaling policies for autoscaling groups
   - Referenced autoscaling groups must already exist
 version_added: "1.6"
-author: Zacharie Eakin
+author: "Zacharie Eakin (@zeekin)"
 options:
   state:
     description:
@@ -23,7 +37,7 @@ options:
       - Name of the associated autoscaling group
     required: true
   adjustment_type:
-    desciption:
+    description:
       - The type of change in capacity of the autoscaling group
     required: false
     choices: ['ChangeInCapacity','ExactCapacity','PercentChangeInCapacity']
@@ -39,7 +53,9 @@ options:
     description:
       - The minimum period of time between which autoscaling actions can take place
     required: false
-extends_documentation_fragment: aws
+extends_documentation_fragment:
+    - aws
+    - ec2
 """
 
 EXAMPLES = '''
@@ -55,8 +71,6 @@ EXAMPLES = '''
 '''
 
 
-import sys
-
 from ansible.module_utils.basic import *
 from ansible.module_utils.ec2 import *
 
@@ -64,10 +78,9 @@ try:
     import boto.ec2.autoscale
     from boto.ec2.autoscale import ScalingPolicy
     from boto.exception import BotoServerError
-
+    HAS_BOTO = True
 except ImportError:
-    print "failed=True msg='boto required for this module'"
-    sys.exit(1)
+    HAS_BOTO = False
 
 
 def create_scaling_policy(connection, module):
@@ -91,9 +104,9 @@ def create_scaling_policy(connection, module):
 
         try:
             connection.create_scaling_policy(sp)
-            policy = connection.get_all_policies(policy_names=[sp_name])[0]
+            policy = connection.get_all_policies(as_group=asg_name,policy_names=[sp_name])[0]
             module.exit_json(changed=True, name=policy.name, arn=policy.policy_arn, as_name=policy.as_name, scaling_adjustment=policy.scaling_adjustment, cooldown=policy.cooldown, adjustment_type=policy.adjustment_type, min_adjustment_step=policy.min_adjustment_step)
-        except BotoServerError, e:
+        except BotoServerError as e:
             module.fail_json(msg=str(e))
     else:
         policy = scalingPolicies[0]
@@ -118,9 +131,9 @@ def create_scaling_policy(connection, module):
         try:
             if changed:
                 connection.create_scaling_policy(policy)
-                policy = connection.get_all_policies(policy_names=[sp_name])[0]
+                policy = connection.get_all_policies(as_group=asg_name,policy_names=[sp_name])[0]
             module.exit_json(changed=changed, name=policy.name, arn=policy.policy_arn, as_name=policy.as_name, scaling_adjustment=policy.scaling_adjustment, cooldown=policy.cooldown, adjustment_type=policy.adjustment_type, min_adjustment_step=policy.min_adjustment_step)
-        except BotoServerError, e:
+        except BotoServerError as e:
             module.fail_json(msg=str(e))
 
 
@@ -134,7 +147,7 @@ def delete_scaling_policy(connection, module):
         try:
             connection.delete_policy(sp_name, asg_name)
             module.exit_json(changed=True)
-        except BotoServerError, e:
+        except BotoServerError as e:
             module.exit_json(changed=False, msg=str(e))
     else:
         module.exit_json(changed=False)
@@ -150,12 +163,14 @@ def main():
             scaling_adjustment = dict(type='int'),
             min_adjustment_step = dict(type='int'),
             cooldown = dict(type='int'),
-            region = dict(aliases=['aws_region', 'ec2_region'], choices=AWS_REGIONS),
             state=dict(default='present', choices=['present', 'absent']),
         )
     )
 
     module = AnsibleModule(argument_spec=argument_spec)
+
+    if not HAS_BOTO:
+        module.fail_json(msg='boto required for this module')
 
     region, ec2_url, aws_connect_params = get_aws_connection_info(module)
 
@@ -163,7 +178,7 @@ def main():
 
     try:
         connection = connect_to_aws(boto.ec2.autoscale, region, **aws_connect_params)
-    except (boto.exception.NoAuthHandlerFound, StandardError), e:
+    except (boto.exception.NoAuthHandlerFound, AnsibleAWSError) as e:
         module.fail_json(msg = str(e))
 
     if state == 'present':
@@ -172,4 +187,5 @@ def main():
         delete_scaling_policy(connection, module)
 
 
-main()
+if __name__ == '__main__':
+    main()

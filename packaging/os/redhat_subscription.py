@@ -1,13 +1,28 @@
 #!/usr/bin/python
 
+# James Laska (jlaska@redhat.com)
+#
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+
 DOCUMENTATION = '''
 ---
 module: redhat_subscription
-short_description: Manage Red Hat Network registration and subscriptions using the C(subscription-manager) command
+short_description: Manage registration and subscriptions to RHSM using the C(subscription-manager) command
 description:
-    - Manage registration and subscription to the Red Hat Network entitlement platform.
+    - Manage registration and subscription to the Red Hat Subscription Management entitlement platform using the C(subscription-manager) command
 version_added: "1.2"
-author: James Laska
+author: "Barnaby Court (@barnabycourt)"
 notes:
     - In order to register a system, subscription-manager requires either a username and password, or an activationkey.
 requirements:
@@ -21,22 +36,22 @@ options:
         default: "present"
     username:
         description:
-            - Red Hat Network username
+            - access.redhat.com or Sat6  username
         required: False
         default: null
     password:
         description:
-            - Red Hat Network password
+            - access.redhat.com or Sat6 password
         required: False
         default: null
     server_hostname:
         description:
-            - Specify an alternative Red Hat Network server
+            - Specify an alternative Red Hat Subscription Management or Sat6 server
         required: False
         default: Current value from C(/etc/rhsm/rhsm.conf) is the default
     server_insecure:
         description:
-            - Allow traffic over insecure http
+            - Enable or disable https server certificate verification when connecting to C(server_hostname)
         required: False
         default: Current value from C(/etc/rhsm/rhsm.conf) is the default
     rhsm_baseurl:
@@ -54,22 +69,75 @@ options:
             - supply an activation key for use with registration
         required: False
         default: null
+    org_id:
+        description:
+            - Organization ID to use in conjunction with activationkey
+        required: False
+        default: null
+        version_added: "2.0"
+    environment:
+        description:
+            - Register with a specific environment in the destination org. Used with Red Hat Satellite 6.x or Katello
+        required: False
+        default: null
+        version_added: "2.2"
     pool:
         description:
             - Specify a subscription pool name to consume.  Regular expressions accepted.
         required: False
         default: '^$'
+    consumer_type:
+        description:
+            - The type of unit to register, defaults to system
+        required: False
+        default: null
+        version_added: "2.1"
+    consumer_name:
+        description:
+            - Name of the system to register, defaults to the hostname
+        required: False
+        default: null
+        version_added: "2.1"
+    consumer_id:
+        description:
+            - References an existing consumer ID to resume using a previous registration for this system. If the  system's identity certificate is lost or corrupted, this option allows it to resume using its previous identity and subscriptions. The default is to not specify a consumer ID so a new ID is created.
+        required: False
+        default: null
+        version_added: "2.1"
+    force_register:
+        description:
+            -  Register the system even if it is already registered
+        required: False
+        default: False
+        version_added: "2.2"
 '''
 
 EXAMPLES = '''
 # Register as user (joe_user) with password (somepass) and auto-subscribe to available content.
 - redhat_subscription: state=present username=joe_user password=somepass autosubscribe=true
 
+# Same as above but with pulling existing system data.
+- redhat_subscription: state=present username=joe_user password=somepass
+                       consumer_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
 # Register with activationkey (1-222333444) and consume subscriptions matching
 # the names (Red hat Enterprise Server) and (Red Hat Virtualization)
 - redhat_subscription: state=present
                        activationkey=1-222333444
                        pool='^(Red Hat Enterprise Server|Red Hat Virtualization)$'
+
+# Update the consumed subscriptions from the previous example (remove the Red
+# Hat Virtualization subscription)
+- redhat_subscription: state=present
+                       activationkey=1-222333444
+                       pool='^Red Hat Enterprise Server$'
+
+# Register as user credentials into given environment (against Red Hat
+# Satellite 6.x), and auto-subscribe to available content.
+- redhat_subscription: state=present
+                       username=joe_user password=somepass
+                       environment=Library
+                       autosubscribe=true
 '''
 
 import os
@@ -162,7 +230,7 @@ class Rhsm(RegistrationBase):
 
     def configure(self, **kwargs):
         '''
-            Configure the system as directed for registration with RHN
+            Configure the system as directed for registration with RHSM
             Raises:
               * Exception - if error occurs while running command
         '''
@@ -174,7 +242,7 @@ class Rhsm(RegistrationBase):
         for k,v in kwargs.items():
             if re.search(r'^(system|rhsm)_', k):
                 args.append('--%s=%s' % (k.replace('_','.'), v))
-        
+
         self.module.run_command(args, check_rc=True)
 
     @property
@@ -183,7 +251,7 @@ class Rhsm(RegistrationBase):
             Determine whether the current system
             Returns:
               * Boolean - whether the current system is currently registered to
-                          RHN.
+                          RHSM.
         '''
         # Quick version...
         if False:
@@ -197,9 +265,10 @@ class Rhsm(RegistrationBase):
         else:
             return False
 
-    def register(self, username, password, autosubscribe, activationkey):
+    def register(self, username, password, autosubscribe, activationkey, org_id,
+                 consumer_type, consumer_name, consumer_id, force_register, environment):
         '''
-            Register the current system to the provided RHN server
+            Register the current system to the provided RHSM or Sat6 server
             Raises:
               * Exception - if error occurs while running command
         '''
@@ -207,7 +276,9 @@ class Rhsm(RegistrationBase):
 
         # Generate command arguments
         if activationkey:
-            args.append('--activationkey "%s"' % activationkey)
+            args.extend(['--activationkey', activationkey])
+            if org_id:
+                args.extend(['--org', org_id])
         else:
             if autosubscribe:
                 args.append('--autosubscribe')
@@ -215,17 +286,39 @@ class Rhsm(RegistrationBase):
                 args.extend(['--username', username])
             if password:
                 args.extend(['--password', password])
+            if consumer_type:
+                args.extend(['--type', consumer_type])
+            if consumer_name:
+                args.extend(['--name', consumer_name])
+            if consumer_id:
+                args.extend(['--consumerid', consumer_id])
+            if force_register:
+                args.extend(['--force'])
+            if environment:
+                args.extend(['--environment', environment])
 
         rc, stderr, stdout = self.module.run_command(args, check_rc=True)
 
-    def unsubscribe(self):
+    def unsubscribe(self, serials=None):
         '''
-            Unsubscribe a system from all subscribed channels
+            Unsubscribe a system from subscribed channels
+            Args:
+              serials(list or None): list of serials to unsubscribe. If
+                                     serials is none or an empty list, then
+                                     all subscribed channels will be removed.
             Raises:
               * Exception - if error occurs while running command
         '''
-        args = ['subscription-manager', 'unsubscribe', '--all']
-        rc, stderr, stdout = self.module.run_command(args, check_rc=True)
+        items = []
+        if serials is not None and serials:
+            items = ["--serial=%s" % s for s in serials]
+        if serials is None:
+            items = ["--all"]
+
+        if items:
+            args = ['subscription-manager', 'unsubscribe'] + items
+            rc, stderr, stdout = self.module.run_command(args, check_rc=True)
+        return serials
 
     def unregister(self):
         '''
@@ -247,8 +340,27 @@ class Rhsm(RegistrationBase):
         # Available pools ready for subscription
         available_pools = RhsmPools(self.module)
 
+        subscribed_pool_ids = []
         for pool in available_pools.filter(regexp):
             pool.subscribe()
+            subscribed_pool_ids.append(pool.get_pool_id())
+        return subscribed_pool_ids
+
+    def update_subscriptions(self, regexp):
+        changed=False
+        consumed_pools = RhsmPools(self.module, consumed=True)
+        pool_ids_to_keep = [p.get_pool_id() for p in consumed_pools.filter(regexp)]
+
+        serials_to_remove=[p.Serial for p in consumed_pools if p.get_pool_id() not in pool_ids_to_keep]
+        serials = self.unsubscribe(serials=serials_to_remove)
+
+        subscribed_pool_ids = self.subscribe(regexp)
+
+        if subscribed_pool_ids or serials:
+            changed=True
+        return {'changed': changed, 'subscribed_pool_ids': subscribed_pool_ids,
+                'unsubscribed_serials': serials}
+
 
 
 class RhsmPool(object):
@@ -264,8 +376,11 @@ class RhsmPool(object):
     def __str__(self):
         return str(self.__getattribute__('_name'))
 
+    def get_pool_id(self):
+        return getattr(self, 'PoolId', getattr(self, 'PoolID'))
+
     def subscribe(self):
-        args = "subscription-manager subscribe --pool %s" % self.PoolId
+        args = "subscription-manager subscribe --pool %s" % self.get_pool_id()
         rc, stdout, stderr = self.module.run_command(args, check_rc=True)
         if rc == 0:
             return True
@@ -277,18 +392,25 @@ class RhsmPools(object):
     """
         This class is used for manipulating pools subscriptions with RHSM
     """
-    def __init__(self, module):
+    def __init__(self, module, consumed=False):
         self.module = module
-        self.products = self._load_product_list()
+        self.products = self._load_product_list(consumed)
 
     def __iter__(self):
         return self.products.__iter__()
 
-    def _load_product_list(self):
+    def _load_product_list(self, consumed=False):
         """
-            Loads list of all available pools for system in data structure
+            Loads list of all available or consumed pools for system in data structure
+
+            Args:
+                consumed(bool): if True list consumed  pools, else list available pools (default False)
         """
-        args = "subscription-manager list --available"
+        args = "subscription-manager list"
+        if consumed:
+            args += " --consumed"
+        else:
+            args += " --available"
         rc, stdout, stderr = self.module.run_command(args, check_rc=True)
 
         products = []
@@ -327,23 +449,29 @@ class RhsmPools(object):
 def main():
 
     # Load RHSM configuration from file
-    rhn = Rhsm(None)
+    rhsm = Rhsm(None)
 
     module = AnsibleModule(
                 argument_spec = dict(
                     state = dict(default='present', choices=['present', 'absent']),
                     username = dict(default=None, required=False),
-                    password = dict(default=None, required=False),
-                    server_hostname = dict(default=rhn.config.get_option('server.hostname'), required=False),
-                    server_insecure = dict(default=rhn.config.get_option('server.insecure'), required=False),
-                    rhsm_baseurl = dict(default=rhn.config.get_option('rhsm.baseurl'), required=False),
+                    password = dict(default=None, required=False, no_log=True),
+                    server_hostname = dict(default=rhsm.config.get_option('server.hostname'), required=False),
+                    server_insecure = dict(default=rhsm.config.get_option('server.insecure'), required=False),
+                    rhsm_baseurl = dict(default=rhsm.config.get_option('rhsm.baseurl'), required=False),
                     autosubscribe = dict(default=False, type='bool'),
                     activationkey = dict(default=None, required=False),
+                    org_id = dict(default=None, required=False),
+                    environment = dict(default=None, required=False, type='str'),
                     pool = dict(default='^$', required=False, type='str'),
+                    consumer_type = dict(default=None, required=False),
+                    consumer_name = dict(default=None, required=False),
+                    consumer_id = dict(default=None, required=False),
+                    force_register = dict(default=False, type='bool'),
                 )
             )
 
-    rhn.module = module
+    rhsm.module = module
     state = module.params['state']
     username = module.params['username']
     password = module.params['password']
@@ -352,7 +480,13 @@ def main():
     rhsm_baseurl = module.params['rhsm_baseurl']
     autosubscribe = module.params['autosubscribe'] == True
     activationkey = module.params['activationkey']
+    org_id = module.params['org_id']
+    environment = module.params['environment']
     pool = module.params['pool']
+    consumer_type = module.params["consumer_type"]
+    consumer_name = module.params["consumer_name"]
+    consumer_id = module.params["consumer_id"]
+    force_register = module.params["force_register"]
 
     # Ensure system is registered
     if state == 'present':
@@ -364,28 +498,42 @@ def main():
             module.fail_json(msg="Missing arguments, If registering without an activationkey, must supply username or password")
 
         # Register system
-        if rhn.is_registered:
-            module.exit_json(changed=False, msg="System already registered.")
+        if rhsm.is_registered and not force_register:
+            if pool != '^$':
+                try:
+                    result = rhsm.update_subscriptions(pool)
+                except Exception:
+                    e = get_exception()
+                    module.fail_json(msg="Failed to update subscriptions for '%s': %s" % (server_hostname, e))
+                else:
+                    module.exit_json(**result)
+            else:
+                module.exit_json(changed=False, msg="System already registered.")
         else:
             try:
-                rhn.enable()
-                rhn.configure(**module.params)
-                rhn.register(username, password, autosubscribe, activationkey)
-                rhn.subscribe(pool)
-            except Exception, e:
+                rhsm.enable()
+                rhsm.configure(**module.params)
+                rhsm.register(username, password, autosubscribe, activationkey, org_id,
+                             consumer_type, consumer_name, consumer_id, force_register,
+                             environment)
+                subscribed_pool_ids = rhsm.subscribe(pool)
+            except Exception:
+                e = get_exception()
                 module.fail_json(msg="Failed to register with '%s': %s" % (server_hostname, e))
             else:
-                module.exit_json(changed=True, msg="System successfully registered to '%s'." % server_hostname)
-
+                module.exit_json(changed=True,
+                                 msg="System successfully registered to '%s'." % server_hostname,
+                                 subscribed_pool_ids=subscribed_pool_ids)
     # Ensure system is *not* registered
     if state == 'absent':
-        if not rhn.is_registered:
+        if not rhsm.is_registered:
             module.exit_json(changed=False, msg="System already unregistered.")
         else:
             try:
-                rhn.unsubscribe()
-                rhn.unregister()
-            except Exception, e:
+                rhsm.unsubscribe()
+                rhsm.unregister()
+            except Exception:
+                e = get_exception()
                 module.fail_json(msg="Failed to unregister: %s" % e)
             else:
                 module.exit_json(changed=True, msg="System successfully unregistered from %s." % server_hostname)

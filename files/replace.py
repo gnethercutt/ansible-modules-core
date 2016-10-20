@@ -25,8 +25,10 @@ import tempfile
 DOCUMENTATION = """
 ---
 module: replace
-author: Evan Kaufman
-extends_documentation_fragment: files
+author: "Evan Kaufman (@EvanK)"
+extends_documentation_fragment:
+    - files
+    - validate
 short_description: Replace all instances of a particular string in a
                    file using a back-referenced regular expression.
 description:
@@ -61,16 +63,17 @@ options:
     description:
       - Create a backup file including the timestamp information so you can
         get the original file back if you somehow clobbered it incorrectly.
-  validate:
-    required: false
-    description:
-      - validation to run before copying into place
-    required: false
-    default: None
   others:
     description:
       - All arguments accepted by the M(file) module also work here.
     required: false
+  follow:
+    required: false
+    default: "no"
+    choices: [ "yes", "no" ]
+    version_added: "1.9"
+    description:
+      - 'This flag indicates that filesystem links, if they exist, should be followed.'
 """
 
 EXAMPLES = r"""
@@ -99,7 +102,7 @@ def write_changes(module,contents,dest):
             module.fail_json(msg='failed to validate: '
                                  'rc:%s error:%s' % (rc,err))
     if valid:
-        module.atomic_move(tmpfile, dest)
+        module.atomic_move(tmpfile, dest, unsafe_writes=module.params['unsafe_writes'])
 
 def check_file_attrs(module, changed, message):
 
@@ -128,6 +131,7 @@ def main():
 
     params = module.params
     dest = os.path.expanduser(params['dest'])
+    diff = dict()
 
     if os.path.isdir(dest):
         module.fail_json(rc=256, msg='Destination %s is a directory !' % dest)
@@ -139,15 +143,25 @@ def main():
         contents = f.read()
         f.close()
 
+    if module._diff:
+        diff = {
+            'before_header': dest,
+            'before': contents,
+        }
+
     mre = re.compile(params['regexp'], re.MULTILINE)
     result = re.subn(mre, params['replace'], contents, 0)
 
     if result[1] > 0 and contents != result[0]:
         msg = '%s replacements made' % result[1]
         changed = True
+        if module._diff:
+            diff['after_header'] = dest
+            diff['after'] = result[0]
     else:
         msg = ''
         changed = False
+        diff = dict()
 
     if changed and not module.check_mode:
         if params['backup'] and os.path.exists(dest):
@@ -157,9 +171,10 @@ def main():
         write_changes(module, result[0], dest)
 
     msg, changed = check_file_attrs(module, changed, msg)
-    module.exit_json(changed=changed, msg=msg)
+    module.exit_json(changed=changed, msg=msg, diff=diff)
 
 # this is magic, see lib/ansible/module_common.py
-#<<INCLUDE_ANSIBLE_MODULE_COMMON>>
+from ansible.module_utils.basic import *
 
-main()
+if __name__ == '__main__':
+    main()

@@ -16,6 +16,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this software.  If not, see <http://www.gnu.org/licenses/>.
 
+import time
 try:
     from novaclient.v1_1 import client as nova_client
     try:
@@ -23,15 +24,16 @@ try:
     except ImportError:
         from quantumclient.quantum import client
     from keystoneclient.v2_0 import client as ksclient
-    import time
+    HAVE_DEPS = True
 except ImportError:
-    print "failed=True msg='novaclient, keystone, and quantumclient (or neutronclient) client are required'"
+    HAVE_DEPS = False
 
 DOCUMENTATION = '''
 ---
 module: quantum_floating_ip_associate
 version_added: "1.2"
-deprecated: Deprecated in 1.9. Use os_floating_ip instead
+author: "Benno Joy (@bennojoy)"
+deprecated: Deprecated in 2.0. Use os_floating_ip instead
 short_description: Associate or disassociate a particular floating IP with an instance
 description:
    - Associates or disassociates a specific floating IP with a particular instance
@@ -76,7 +78,11 @@ options:
         - floating ip that should be assigned to the instance
      required: true
      default: None
-requirements: ["quantumclient", "neutronclient", "keystoneclient"]
+requirements:
+    - "python >= 2.6"
+    - "python-novaclient"
+    - "python-neutronclient or python-quantumclient"
+    - "python-keystoneclient"
 '''
 
 EXAMPLES = '''
@@ -96,7 +102,7 @@ def _get_ksclient(module, kwargs):
                                  password=kwargs.get('login_password'),
                                  tenant_name=kwargs.get('login_tenant_name'),
                                  auth_url=kwargs.get('auth_url'))
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error authenticating to the keystone: %s " % e.message)
     global _os_keystone
     _os_keystone = kclient
@@ -106,7 +112,7 @@ def _get_ksclient(module, kwargs):
 def _get_endpoint(module, ksclient):
     try:
         endpoint = ksclient.service_catalog.url_for(service_type='network', endpoint_type='publicURL')
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error getting network endpoint: %s" % e.message)
     return endpoint
 
@@ -120,7 +126,7 @@ def _get_neutron_client(module, kwargs):
     }
     try:
         neutron = client.Client('2.0', **kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error in connecting to neutron: %s " % e.message)
     return neutron
 
@@ -136,7 +142,7 @@ def _get_server_state(module, nova):
                         module.fail_json(msg="The VM is available but not Active. state:" + info['status'])
                     server_info = info
                     break
-    except Exception, e:
+    except Exception as e:
             module.fail_json(msg = "Error in getting the server list: %s" % e.message)
     return server_info, server
 
@@ -144,7 +150,7 @@ def _get_port_id(neutron, module, instance_id):
     kwargs = dict(device_id = instance_id)
     try:
         ports = neutron.list_ports(**kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json( msg = "Error in listing ports: %s" % e.message)
     if not ports['ports']:
         return None
@@ -156,7 +162,7 @@ def _get_floating_ip_id(module, neutron):
     }
     try:
         ips = neutron.list_floatingips(**kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "error in fetching the floatingips's %s" % e.message)
     if not ips['floatingips']:
         module.fail_json(msg = "Could find the ip specified in parameter, Please check")
@@ -173,7 +179,7 @@ def _update_floating_ip(neutron, module, port_id, floating_ip_id):
     }
     try:
         result = neutron.update_floatingip(floating_ip_id, {'floatingip': kwargs})
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "There was an error in updating the floating ip address: %s" % e.message)
     module.exit_json(changed = True, result = result, public_ip=module.params['ip_address'])
 
@@ -187,10 +193,13 @@ def main():
     ))
     module = AnsibleModule(argument_spec=argument_spec)
 
+    if not HAVE_DEPS:
+        module.fail_json(msg='python-novaclient, python-keystoneclient, and either python-neutronclient or python-quantumclient are required')
+
     try:
         nova = nova_client.Client(module.params['login_username'], module.params['login_password'],
                                  module.params['login_tenant_name'], module.params['auth_url'], service_type='compute')
-    except Exception, e:
+    except Exception as e:
         module.fail_json( msg = " Error in authenticating to nova: %s" % e.message)
     neutron = _get_neutron_client(module, module.params)
     state, floating_ip_id = _get_floating_ip_id(module, neutron)
@@ -215,5 +224,6 @@ def main():
 # this is magic, see lib/ansible/module.params['common.py
 from ansible.module_utils.basic import *
 from ansible.module_utils.openstack import *
-main()
+if __name__ == '__main__':
+    main()
 

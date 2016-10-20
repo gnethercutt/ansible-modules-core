@@ -136,7 +136,7 @@ notes:
     another user also, R can still access database objects via these privileges.
   - When revoking privileges, C(RESTRICT) is assumed (see PostgreSQL docs).
 requirements: [psycopg2]
-author: Bernhard Weitzhofer
+author: "Bernhard Weitzhofer (@b6d)"
 """
 
 EXAMPLES = """
@@ -315,7 +315,7 @@ class Connection(object):
         query = """SELECT relname
                    FROM pg_catalog.pg_class c
                    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-                   WHERE nspname = %s AND relkind = 'r'"""
+                   WHERE nspname = %s AND relkind in ('r', 'v')"""
         self.cursor.execute(query, (schema,))
         return [t[0] for t in self.cursor.fetchall()]
 
@@ -537,7 +537,7 @@ def main():
             port=dict(type='int', default=5432),
             unix_socket=dict(default='', aliases=['login_unix_socket']),
             login=dict(default='postgres', aliases=['login_user']),
-            password=dict(default='', aliases=['login_password'])
+            password=dict(default='', aliases=['login_password'], no_log=True)
         ),
         supports_check_mode = True
     )
@@ -573,7 +573,8 @@ def main():
         module.fail_json(msg='Python module "psycopg2" must be installed.')
     try:
         conn = Connection(p)
-    except psycopg2.Error, e:
+    except psycopg2.Error:
+        e = get_exception()
         module.fail_json(msg='Could not connect to database: %s' % e)
 
     try:
@@ -613,11 +614,13 @@ def main():
             schema_qualifier=p.schema
         )
 
-    except Error, e:
+    except Error:
+        e = get_exception()
         conn.rollback()
         module.fail_json(msg=e.message)
 
-    except psycopg2.Error, e:
+    except psycopg2.Error:
+        e = get_exception()
         conn.rollback()
         # psycopg2 errors come in connection encoding, reencode
         msg = e.message.decode(conn.encoding).encode(sys.getdefaultencoding(),

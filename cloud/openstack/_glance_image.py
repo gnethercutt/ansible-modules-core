@@ -20,7 +20,7 @@ DOCUMENTATION = '''
 ---
 module: glance_image
 version_added: "1.2"
-deprecated: Deprecated in 1.9. Use os_image instead
+deprecated: Deprecated in 1.10. Use os_image instead
 short_description: Add/Delete images from glance
 description:
    - Add or Remove images from the glance repository.
@@ -112,7 +112,10 @@ options:
      required: false
      default: publicURL
      version_added: "1.7"
-requirements: ["glanceclient", "keystoneclient"]
+requirements:
+    - "python >= 2.6"
+    - "python-glanceclient"
+    - "python-keystoneclient"
 
 '''
 
@@ -131,9 +134,14 @@ EXAMPLES = '''
 import time
 try:
     import glanceclient
-    from keystoneclient.v2_0 import client as ksclient
+    HAS_GLANCECLIENT = True
 except ImportError:
-    print("failed=True msg='glanceclient and keystone client are required'")
+    HAS_GLANCECLIENT = False
+try:
+    from keystoneclient.v2_0 import client as ksclient
+    HAS_KEYSTONECLIENT = True
+except ImportError:
+    HAS_KEYSTONECLIENT= False
 
 
 def _get_ksclient(module, kwargs):
@@ -142,7 +150,7 @@ def _get_ksclient(module, kwargs):
                                  password=kwargs.get('login_password'),
                                  tenant_name=kwargs.get('login_tenant_name'),
                                  auth_url=kwargs.get('auth_url'))
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg="Error authenticating to the keystone: %s " % e.message)
     return client 
 
@@ -150,7 +158,7 @@ def _get_ksclient(module, kwargs):
 def _get_endpoint(module, client, endpoint_type):
     try:
         endpoint = client.service_catalog.url_for(service_type='image', endpoint_type=endpoint_type)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg="Error getting endpoint for glance: %s" % e.message)
     return endpoint
 
@@ -164,7 +172,7 @@ def _get_glance_client(module, kwargs):
     }
     try:
         client = glanceclient.Client('1', endpoint, **kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg="Error in connecting to glance: %s" % e.message)
     return client
 
@@ -175,7 +183,7 @@ def _glance_image_present(module, params, client):
             if image.name == params['name']:
                 return image.id 
         return None
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg="Error in fetching image list: %s" % e.message)
 
 
@@ -199,7 +207,7 @@ def _glance_image_create(module, params, client):
             if image.status == 'active':
                 break
             time.sleep(5)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg="Error in creating image: %s" % e.message)
     if image.status == 'active':
         module.exit_json(changed=True, result=image.status, id=image.id)
@@ -212,7 +220,7 @@ def _glance_delete_image(module, params, client):
         for image in client.images.list():
             if image.name == params['name']:
                 client.images.delete(image)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg="Error in deleting image: %s" % e.message)
     module.exit_json(changed=True, result="Deleted")
 
@@ -238,6 +246,12 @@ def main():
         argument_spec=argument_spec,
         mutually_exclusive = [['file','copy_from']],
     )
+
+    if not HAS_GLANCECLIENT:
+        module.fail_json(msg='python-glanceclient is required for this module')
+    if not HAS_KEYSTONECLIENT:
+        module.fail_json(msg='python-keystoneclient is required for this module')
+
     if module.params['state'] == 'present':
         if not module.params['file'] and not module.params['copy_from']:
             module.fail_json(msg="Either file or copy_from variable should be set to create the image")
@@ -258,4 +272,5 @@ def main():
 # this is magic, see lib/ansible/module_common.py
 from ansible.module_utils.basic import *
 from ansible.module_utils.openstack import *
-main()
+if __name__ == '__main__':
+    main()

@@ -182,7 +182,9 @@ options:
     description:
       - how long before wait gives up, in seconds
     default: 300
-author: Jesse Keating, Matt Martz
+author:
+    - "Jesse Keating (@j2sol)"
+    - "Matt Martz (@sivel)"
 notes:
   - I(exact_count) can be "destructive" if the number of running servers in
     the I(group) is larger than that specified in I(count). In such a case, the
@@ -283,12 +285,13 @@ def create(module, names=[], flavor=None, image=None, meta={}, key_name=None,
     if user_data:
         config_drive = True
 
-    if user_data and os.path.isfile(user_data):
+    if user_data and os.path.isfile(os.path.expanduser(user_data)):
         try:
+            user_data = os.path.expanduser(user_data)
             f = open(user_data)
             user_data = f.read()
             f.close()
-        except Exception, e:
+        except Exception as e:
             module.fail_json(msg='Failed to load %s' % user_data)
 
     # Handle the file contents
@@ -298,7 +301,7 @@ def create(module, names=[], flavor=None, image=None, meta={}, key_name=None,
             fileobj = open(lpath, 'r')
             files[rpath] = fileobj.read()
             fileobj.close()
-        except Exception, e:
+        except Exception as e:
             module.fail_json(msg='Failed to load %s' % lpath)
     try:
         servers = []
@@ -313,8 +316,12 @@ def create(module, names=[], flavor=None, image=None, meta={}, key_name=None,
                                              userdata=user_data,
                                              block_device_mapping_v2=bdmv2,
                                              **extra_create_args))
-    except Exception, e:
-        module.fail_json(msg='%s' % e.message)
+    except Exception as e:
+        if e.message:
+            msg = str(e.message)
+        else:
+            msg = repr(e)
+        module.fail_json(msg=msg)
     else:
         changed = True
 
@@ -391,7 +398,7 @@ def delete(module, instance_ids=[], wait=True, wait_timeout=300, kept=[]):
     for server in servers:
         try:
             server.delete()
-        except Exception, e:
+        except Exception as e:
             module.fail_json(msg=e.message)
         else:
             changed = True
@@ -539,7 +546,7 @@ def cloudservers(module, state=None, name=None, flavor=None, image=None,
                 # %d to the end
                 try:
                     name % 0
-                except TypeError, e:
+                except TypeError as e:
                     if e.message.startswith('not all'):
                         name = '%s%%d' % name
                     else:
@@ -629,7 +636,7 @@ def cloudservers(module, state=None, name=None, flavor=None, image=None,
                     # %d to the end
                     try:
                         name % 0
-                    except TypeError, e:
+                    except TypeError as e:
                         if e.message.startswith('not all'):
                             name = '%s%%d' % name
                         else:

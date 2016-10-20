@@ -109,6 +109,7 @@ options:
     default: "present"
     choices: ["active", "present", "absent", "deleted"]
     aliases: []
+    required: false
   service_account_email:
     version_added: "1.6"
     description:
@@ -120,9 +121,16 @@ options:
     version_added: "1.6"
     description:
       - path to the pem file associated with the service account email
+        This option is deprecated. Use 'credentials_file'.
     required: false
     default: null
     aliases: []
+  credentials_file:
+    version_added: "2.1.0"
+    description:
+      - path to the JSON file associated with the service account email
+    default: null
+    required: false
   project_id:
     version_added: "1.6"
     description:
@@ -131,8 +139,10 @@ options:
     default: null
     aliases: []
 
-requirements: [ "libcloud" ]
-author: Eric Johnson <erjohnso@google.com>
+requirements:
+    - "python >= 2.6"
+    - "apache-libcloud >= 0.13.3, >= 0.17.0 if using JSON credentials"
+author: "Eric Johnson (@erjohnso) <erjohnso@google.com>"
 '''
 
 EXAMPLES = '''
@@ -147,9 +157,6 @@ EXAMPLES = '''
     httphealthcheck_path: "/up"
 '''
 
-import sys
-
-
 try:
     from libcloud.compute.types import Provider
     from libcloud.compute.providers import get_driver
@@ -158,10 +165,9 @@ try:
     from libcloud.common.google import GoogleBaseError, QuotaExceededError, \
             ResourceExistsError, ResourceNotFoundError
     _ = Provider.GCE
+    HAS_LIBCLOUD = True
 except ImportError:
-    print("failed=True " + \
-            "msg='libcloud with GCE support required for this module.'")
-    sys.exit(1)
+    HAS_LIBCLOUD = False
 
 
 def main():
@@ -184,9 +190,13 @@ def main():
             state = dict(default='present'),
             service_account_email = dict(),
             pem_file = dict(),
+            credentials_file = dict(),
             project_id = dict(),
         )
     )
+
+    if not HAS_LIBCLOUD:
+        module.fail_json(msg='libcloud with GCE support (0.13.3+) required for this module.')
 
     gce = gce_connect(module)
 
@@ -212,7 +222,7 @@ def main():
         gcelb = get_driver_lb(Provider_lb.GCE)(gce_driver=gce)
         gcelb.connection.user_agent_append("%s/%s" % (
                 USER_AGENT_PRODUCT, USER_AGENT_VERSION))
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg=unexpected_error_msg(e), changed=False)
 
     changed = False
@@ -238,7 +248,7 @@ def main():
                 changed = True
             except ResourceExistsError:
                 hc = gce.ex_get_healthcheck(httphealthcheck_name)
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg=unexpected_error_msg(e), changed=False)
 
             if hc is not None:
@@ -282,7 +292,7 @@ def main():
                 changed = True
             except ResourceExistsError:
                 lb = gcelb.get_balancer(name)
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg=unexpected_error_msg(e), changed=False)
 
             if lb is not None:
@@ -308,7 +318,7 @@ def main():
                 changed = True
             except ResourceNotFoundError:
                 pass
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg=unexpected_error_msg(e), changed=False)
 
         # destroy the health check if specified
@@ -320,16 +330,16 @@ def main():
                 changed = True
             except ResourceNotFoundError:
                 pass
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg=unexpected_error_msg(e), changed=False)
 
 
     json_output['changed'] = changed
-    print json.dumps(json_output)
-    sys.exit(0)
+    module.exit_json(**json_output)
 
 # import module snippets
 from ansible.module_utils.basic import *
 from ansible.module_utils.gce import *
 
-main()
+if __name__ == '__main__':
+    main()

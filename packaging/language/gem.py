@@ -63,6 +63,12 @@ options:
     - Override the path to the gem executable
     required: false
     version_added: "1.4"
+  env_shebang:
+    description:
+      - Rewrite the shebang line on installed scripts to use /usr/bin/env.
+    required: false
+    default: "no"
+    version_added: "2.2"
   version:
     description:
       - Version of the gem to be installed/removed.
@@ -73,7 +79,20 @@ options:
     required: false
     default: "no"
     version_added: "1.6"
-author: Johan Wiren
+  include_doc:
+    description:
+      - Install with or without docs.
+    required: false
+    default: "no"
+    version_added: "2.0"
+  build_flags:
+    description:
+      - Allow adding build flags for gem compilation
+    required: false
+    version_added: "2.0"
+author:
+    - "Ansible Core Team"
+    - "Johan Wiren"
 '''
 
 EXAMPLES = '''
@@ -182,24 +201,35 @@ def install(module):
         cmd.append('--no-user-install')
     if module.params['pre_release']:
         cmd.append('--pre')
-    cmd.append('--no-rdoc')
-    cmd.append('--no-ri')
+    if not module.params['include_doc']:
+        if major and major < 2:
+            cmd.append('--no-rdoc')
+            cmd.append('--no-ri')
+        else:
+            cmd.append('--no-document')
+    if module.params['env_shebang']:
+        cmd.append('--env-shebang')
     cmd.append(module.params['gem_source'])
+    if module.params['build_flags']:
+        cmd.extend([ '--', module.params['build_flags'] ])
     module.run_command(cmd, check_rc=True)
 
 def main():
 
     module = AnsibleModule(
         argument_spec = dict(
-            executable           = dict(required=False, type='str'),
-            gem_source           = dict(required=False, type='str'),
+            executable           = dict(required=False, type='path'),
+            gem_source           = dict(required=False, type='path'),
             include_dependencies = dict(required=False, default=True, type='bool'),
             name                 = dict(required=True, type='str'),
             repository           = dict(required=False, aliases=['source'], type='str'),
             state                = dict(required=False, default='present', choices=['present','absent','latest'], type='str'),
             user_install         = dict(required=False, default=True, type='bool'),
-            pre_release           = dict(required=False, default=False, type='bool'),
+            pre_release          = dict(required=False, default=False, type='bool'),
+            include_doc          = dict(required=False, default=False, type='bool'),
+            env_shebang          = dict(required=False, default=False, type='bool'),
             version              = dict(required=False, type='str'),
+            build_flags          = dict(required=False, type='str'),
         ),
         supports_check_mode = True,
         mutually_exclusive = [ ['gem_source','repository'], ['gem_source','version'] ],

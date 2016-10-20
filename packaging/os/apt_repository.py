@@ -28,7 +28,7 @@ short_description: Add and remove APT repositories
 description:
     - Add or remove an APT repositories in Ubuntu and Debian.
 notes:
-    - This module works on Debian and Ubuntu and requires C(python-apt).
+    - This module works on Debian and Ubuntu.
     - This module supports Debian Squeeze (version 6) as well as its successors.
     - This module treats Debian and Ubuntu distributions separately. So PPA could be installed only on Ubuntu machines.
 options:
@@ -63,14 +63,26 @@ options:
         required: false
         default: 'yes'
         choices: ['yes', 'no']
-author: Alexander Saltanov
+    filename:
+        version_added: '2.1'
+        description:
+            - Sets the name of the source list file in sources.list.d.
+              Defaults to a file name based on the repository source url.
+              The .list extension will be automatically added.
+        required: false
+author: "Alexander Saltanov (@sashka)"
 version_added: "0.7"
-requirements: [ python-apt ]
+requirements:
+   - python-apt (python 2)
+   - python3-apt (python 3)
 '''
 
 EXAMPLES = '''
 # Add specified repository into sources list.
 apt_repository: repo='deb http://archive.canonical.com/ubuntu hardy partner' state=present
+
+# Add specified repository into sources list using specified filename.
+apt_repository: repo='deb http://dl.google.com/linux/chrome/deb/ stable main' state=present filename='google-chrome'
 
 # Add source repository into sources list.
 apt_repository: repo='deb-src http://archive.canonical.com/ubuntu hardy partner' state=present
@@ -86,6 +98,7 @@ apt_repository: repo='ppa:nginx/stable'
 import glob
 import os
 import re
+import sys
 import tempfile
 
 try:
@@ -98,15 +111,25 @@ except ImportError:
     distro = None
     HAVE_PYTHON_APT = False
 
+if sys.version_info[0] < 3:
+    PYTHON_APT = 'python-apt'
+else:
+    PYTHON_APT = 'python3-apt'
+
+DEFAULT_SOURCES_PERM = int('0644', 8)
 
 VALID_SOURCE_TYPES = ('deb', 'deb-src')
+
 
 def install_python_apt(module):
 
     if not module.check_mode:
         apt_get_path = module.get_bin_path('apt-get')
         if apt_get_path:
-            rc, so, se = module.run_command('%s update && %s install python-apt -y -q' % (apt_get_path, apt_get_path), use_unsafe_shell=True)
+            rc, so, se = module.run_command([apt_get_path, 'update'])
+            if rc != 0:
+                module.fail_json(msg="Failed to auto-install %s. Error was: '%s'" % (PYTHON_APT, se.strip()))
+            rc, so, se = module.run_command([apt_get_path, 'install', PYTHON_APT, '-y', '-q'])
             if rc == 0:
                 global apt, apt_pkg, aptsources_distro, distro, HAVE_PYTHON_APT
                 import apt
@@ -115,7 +138,10 @@ def install_python_apt(module):
                 distro = aptsources_distro.get_distro()
                 HAVE_PYTHON_APT = True
             else:
-                module.fail_json(msg="Failed to auto-install python-apt. Error was: '%s'" % se.strip())
+                module.fail_json(msg="Failed to auto-install %s. Error was: '%s'" % (PYTHON_APT, se.strip()))
+    else:
+        module.fail_json(msg="%s must be installed to use check mode" % PYTHON_APT)
+
 
 class InvalidSource(Exception):
     pass
@@ -124,8 +150,11 @@ class InvalidSource(Exception):
 # Simple version of aptsources.sourceslist.SourcesList.
 # No advanced logic and no backups inside.
 class SourcesList(object):
-    def __init__(self):
+    def __init__(self, module):
+        self.module = module
         self.files = {}  # group sources by file
+        # Repositories that we're adding -- used to implement mode param
+        self.new_repos = set()
         self.default_file = self._apt_cfg_file('Dir::Etc::sourcelist')
 
         # read sources.list if it exists
@@ -152,6 +181,9 @@ class SourcesList(object):
 
     def _suggest_filename(self, line):
         def _cleanup_filename(s):
+            filename = self.module.params['filename']
+            if filename is not None:
+                return filename
             return '_'.join(re.sub('[^a-zA-Z0-9]', ' ', s).split())
         def _strip_username_password(s):
             if '@' in s:
@@ -232,15 +264,11 @@ class SourcesList(object):
             group.append((n, valid, enabled, source, comment))
         self.files[file] = group
 
-    def save(self, module):
-        for filename, sources in self.files.items():
+    def save(self):
+        for filename, sources in list(self.files.items()):
             if sources:
                 d, fn = os.path.split(filename)
                 fd, tmp_path = tempfile.mkstemp(prefix=".%s-" % fn, dir=d)
-
-                # allow the user to override the default mode
-                this_mode = module.params['mode']
-                module.set_mode_if_different(tmp_path, this_mode, False)
 
                 f = os.fdopen(fd, 'w')
                 for n, valid, enabled, source, comment in sources:
@@ -256,16 +284,42 @@ class SourcesList(object):
 
                     try:
                         f.write(line)
-                    except IOError, err:
-                        module.fail_json(msg="Failed to write to file %s: %s" % (tmp_path, unicode(err)))
-                module.atomic_move(tmp_path, filename)
+                    except IOError:
+                        err = get_exception()
+                        self.module.fail_json(msg="Failed to write to file %s: %s" % (tmp_path, unicode(err)))
+                self.module.atomic_move(tmp_path, filename)
+
+                # allow the user to override the default mode
+                if filename in self.new_repos:
+                    this_mode = self.module.params.get('mode', DEFAULT_SOURCES_PERM)
+                    self.module.set_mode_if_different(filename, this_mode, False)
             else:
                 del self.files[filename]
                 if os.path.exists(filename):
                     os.remove(filename)
 
     def dump(self):
-        return '\n'.join([str(i) for i in self])
+        dumpstruct = {}
+        for filename, sources in self.files.items():
+            if sources:
+                lines = []
+                for n, valid, enabled, source, comment in sources:
+                    chunks = []
+                    if not enabled:
+                        chunks.append('# ')
+                    chunks.append(source)
+                    if comment:
+                        chunks.append(' # ')
+                        chunks.append(comment)
+                    chunks.append('\n')
+                    lines.append(''.join(chunks))
+                dumpstruct[filename] = ''.join(lines)
+        return dumpstruct
+
+    def _choice(self, new, old):
+        if new is None:
+            return old
+        return new
 
     def modify(self, file, n, enabled=None, source=None, comment=None):
         '''
@@ -273,8 +327,7 @@ class SourcesList(object):
         If source, enabled, or comment is None, original value from line ``n`` will be preserved.
         '''
         valid, enabled_old, source_old, comment_old = self.files[file][n][1:]
-        choice = lambda new, old: old if new is None else new
-        self.files[file][n] = (n, valid, choice(enabled, enabled_old), choice(source, source_old), choice(comment, comment_old))
+        self.files[file][n] = (n, valid, self._choice(enabled, enabled_old), self._choice(source, source_old), self._choice(comment, comment_old))
 
     def _add_valid_source(self, source_new, comment_new, file):
         # We'll try to reuse disabled source if we have it.
@@ -296,6 +349,7 @@ class SourcesList(object):
 
             files = self.files[file]
             files.append((len(files), True, True, source_new, comment_new))
+            self.new_repos.add(file)
 
     def add_source(self, line, comment='', file=None):
         source = self._parse(line, raise_if_invalid_or_disabled=True)[2]
@@ -321,7 +375,7 @@ class UbuntuSourcesList(SourcesList):
     def __init__(self, module, add_ppa_signing_keys_callback=None):
         self.module = module
         self.add_ppa_signing_keys_callback = add_ppa_signing_keys_callback
-        super(UbuntuSourcesList, self).__init__()
+        super(UbuntuSourcesList, self).__init__(module)
 
     def _get_ppa_info(self, owner_name, ppa_name):
         lp_api = self.LP_API % (owner_name, ppa_name)
@@ -330,7 +384,7 @@ class UbuntuSourcesList(SourcesList):
         response, info = fetch_url(self.module, lp_api, headers=headers)
         if info['status'] != 200:
             self.module.fail_json(msg="failed to fetch PPA information, error was: %s" % info['msg'])
-        return json.load(response)
+        return json.loads(to_native(response.read()))
 
     def _expand_ppa(self, path):
         ppa = path.split(':')[1]
@@ -351,6 +405,10 @@ class UbuntuSourcesList(SourcesList):
         if line.startswith('ppa:'):
             source, ppa_owner, ppa_name = self._expand_ppa(line)
 
+            if source in self.repos_urls:
+                # repository already exists
+                return
+
             if self.add_ppa_signing_keys_callback is not None:
                 info = self._get_ppa_info(ppa_owner, ppa_name)
                 if not self._key_already_exists(info['signing_key_fingerprint']):
@@ -370,6 +428,25 @@ class UbuntuSourcesList(SourcesList):
             source = self._parse(line, raise_if_invalid_or_disabled=True)[2]
         self._remove_valid_source(source)
 
+    @property
+    def repos_urls(self):
+        _repositories = []
+        for parsed_repos in self.files.values():
+            for parsed_repo in parsed_repos:
+                enabled = parsed_repo[1]
+                source_line = parsed_repo[3]
+
+                if not enabled:
+                    continue
+
+                if source_line.startswith('ppa:'):
+                    source, ppa_owner, ppa_name = self._expand_ppa(source_line)
+                    _repositories.append(source)
+                else:
+                    _repositories.append(source_line)
+
+        return _repositories
+
 
 def get_add_ppa_signing_key_callback(module):
     def _run_command(command):
@@ -386,8 +463,9 @@ def main():
         argument_spec=dict(
             repo=dict(required=True),
             state=dict(choices=['present', 'absent'], default='present'),
-            mode=dict(required=False, default=0644),
+            mode=dict(required=False, type='raw'),
             update_cache = dict(aliases=['update-cache'], type='bool', default='yes'),
+            filename=dict(required=False, default=None),
             # this should not be needed, but exists as a failsafe
             install_python_apt=dict(required=False, default="yes", type='bool'),
             validate_certs = dict(default='yes', type='bool'),
@@ -396,24 +474,26 @@ def main():
     )
 
     params = module.params
-    if params['install_python_apt'] and not HAVE_PYTHON_APT and not module.check_mode:
-        install_python_apt(module)
-
     repo = module.params['repo']
     state = module.params['state']
     update_cache = module.params['update_cache']
+    # Note: mode is referenced in SourcesList class via the passed in module (self here)
+
     sourceslist = None
 
-    if HAVE_PYTHON_APT:
-        if isinstance(distro, aptsources_distro.UbuntuDistribution):
-            sourceslist = UbuntuSourcesList(module,
-                add_ppa_signing_keys_callback=get_add_ppa_signing_key_callback(module))
-        elif HAVE_PYTHON_APT and \
-            isinstance(distro, aptsources_distro.DebianDistribution) or isinstance(distro, aptsources_distro.Distribution):
-            sourceslist = SourcesList()
+    if not HAVE_PYTHON_APT:
+        if params['install_python_apt']:
+            install_python_apt(module)
+        else:
+            module.fail_json(msg='%s is not installed, and install_python_apt is False' % PYTHON_APT)
+
+    if isinstance(distro, aptsources_distro.UbuntuDistribution):
+        sourceslist = UbuntuSourcesList(module,
+            add_ppa_signing_keys_callback=get_add_ppa_signing_key_callback(module))
+    elif isinstance(distro, aptsources_distro.Distribution):
+        sourceslist = SourcesList(module)
     else:
-        module.fail_json(msg='Module apt_repository supports only Debian and Ubuntu. ' + \
-                             'You may be seeing this because python-apt is not installed, but you requested that it not be auto-installed')
+        module.fail_json(msg='Module apt_repository supports only Debian and Ubuntu.')
 
     sources_before = sourceslist.dump()
 
@@ -422,22 +502,34 @@ def main():
             sourceslist.add_source(repo)
         elif state == 'absent':
             sourceslist.remove_source(repo)
-    except InvalidSource, err:
+    except InvalidSource:
+        err = get_exception()
         module.fail_json(msg='Invalid repository string: %s' % unicode(err))
 
     sources_after = sourceslist.dump()
     changed = sources_before != sources_after
 
-    if not module.check_mode and changed:
+    if changed and module._diff:
+        diff = []
+        for filename in set(sources_before.keys()).union(sources_after.keys()):
+            diff.append({'before': sources_before.get(filename, ''),
+                         'after': sources_after.get(filename, ''),
+                         'before_header': (filename, '/dev/null')[filename not in sources_before],
+                         'after_header': (filename, '/dev/null')[filename not in sources_after]})
+    else:
+        diff = {}
+
+    if changed and not module.check_mode:
         try:
-            sourceslist.save(module)
+            sourceslist.save()
             if update_cache:
                 cache = apt.Cache()
                 cache.update()
-        except OSError, err:
+        except OSError:
+            err = get_exception()
             module.fail_json(msg=unicode(err))
 
-    module.exit_json(changed=changed, repo=repo, state=state)
+    module.exit_json(changed=changed, repo=repo, state=state, diff=diff)
 
 # import module snippets
 from ansible.module_utils.basic import *

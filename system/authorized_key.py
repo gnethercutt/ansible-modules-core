@@ -26,20 +26,17 @@ DOCUMENTATION = '''
 module: authorized_key
 short_description: Adds or removes an SSH authorized key
 description:
-     - Adds or removes an SSH authorized key for a user from a remote host.
+    - "Adds or removes SSH authorized keys for particular user accounts"
 version_added: "0.5"
 options:
   user:
     description:
       - The username on the remote host whose authorized_keys file will be modified
     required: true
-    default: null
-    aliases: []
   key:
     description:
       - The SSH public key(s), as a string or (since 1.9) url (https://github.com/username.keys)
     required: true
-    default: null
   path:
     description:
       - Alternate path to the authorized_keys file
@@ -72,16 +69,25 @@ options:
     version_added: "1.4"
   exclusive:
     description:
-      - Whether to remove all other non-specified keys from the
-        authorized_keys file. Multiple keys can be specified in a single
-        key= string value by separating them by newlines.
+      - Whether to remove all other non-specified keys from the authorized_keys file. Multiple keys
+        can be specified in a single C(key) string value by separating them by newlines.
+      - This option is not loop aware, so if you use C(with_) , it will be exclusive per iteration
+        of the loop, if you want multiple keys in the file you need to pass them all to C(key) in a
+        single batch as mentioned above.
     required: false
     choices: [ "yes", "no" ]
     default: "no"
     version_added: "1.9"
-description:
-    - "Adds or removes authorized keys for particular user accounts"
-author: Brad Olson
+  validate_certs:
+    description:
+      - This only applies if using a https url as the source of the keys. If set to C(no), the SSL certificates will not be validated.
+      - This should only set to C(no) used on personally controlled sites using self-signed certificates as it avoids verifying the source site.
+      - Prior to 2.1 the code worked as if this was set to C(yes).
+    required: false
+    default: "yes"
+    choices: ["yes", "no"]
+    version_added: "2.1"
+author: "Ansible Core Team"
 '''
 
 EXAMPLES = '''
@@ -92,27 +98,37 @@ EXAMPLES = '''
 - authorized_key: user=charlie key=https://github.com/charlie.keys
 
 # Using alternate directory locations:
-- authorized_key: user=charlie
-                  key="{{ lookup('file', '/home/charlie/.ssh/id_rsa.pub') }}"
-                  path='/etc/ssh/authorized_keys/charlie'
-                  manage_dir=no
+- authorized_key:
+    user: charlie
+    key: "{{ lookup('file', '/home/charlie/.ssh/id_rsa.pub') }}"
+    path: '/etc/ssh/authorized_keys/charlie'
+    manage_dir: no
 
 # Using with_file
 - name: Set up authorized_keys for the deploy user
-  authorized_key: user=deploy
-                  key="{{ item }}"
+  authorized_key: user=deploy key="{{ item }}"
   with_file:
     - public_keys/doe-jane
     - public_keys/doe-john
 
 # Using key_options:
-- authorized_key: user=charlie
-                  key="{{ lookup('file', '/home/charlie/.ssh/id_rsa.pub') }}"
-                  key_options='no-port-forwarding,host="10.0.1.1"'
+- authorized_key:
+    user: charlie
+    key:  "{{ lookup('file', '/home/charlie/.ssh/id_rsa.pub') }}"
+    key_options: 'no-port-forwarding,from="10.0.1.1"'
+
+# Using validate_certs:
+- authorized_key: user=charlie key=https://github.com/user.keys validate_certs=no
 
 # Set up authorized_keys exclusively with one key
-- authorized_keys: user=root key=public_keys/doe-jane state=present
-                   exclusive=yes
+- authorized_key: user=root key="{{ item }}" state=present exclusive=yes
+  with_file:
+    - public_keys/doe-jane
+
+# Copies the key from the user who is running ansible to the remote machine user ubuntu
+- authorized_key: user=ubuntu key="{{ lookup('file', lookup('env','HOME') + '/.ssh/id_rsa.pub') }}"
+  become: yes
+
 '''
 
 # Makes sure the public key line is present or absent in the user's .ssh/authorized_keys.
@@ -138,23 +154,23 @@ import shlex
 class keydict(dict):
 
     """ a dictionary that maintains the order of keys as they are added """
-    
+
     # http://stackoverflow.com/questions/2328235/pythonextend-the-dict-class
 
     def __init__(self, *args, **kw):
         super(keydict,self).__init__(*args, **kw)
-        self.itemlist = super(keydict,self).keys()
+        self.itemlist = list(super(keydict,self).keys())
     def __setitem__(self, key, value):
         self.itemlist.append(key)
-        super(keydict,self).__setitem__(key, value)        
+        super(keydict,self).__setitem__(key, value)
     def __iter__(self):
         return iter(self.itemlist)
     def keys(self):
-        return self.itemlist
+        return list(set(self.itemlist))
     def values(self):
         return [self[key] for key in self]
     def itervalues(self):
-        return (self[key] for key in self)    
+        return (self[key] for key in self)
 
 def keyfile(module, user, write=False, path=None, manage_dir=True):
     """
@@ -168,9 +184,16 @@ def keyfile(module, user, write=False, path=None, manage_dir=True):
     :return: full path string to authorized_keys for user
     """
 
+    if module.check_mode and path is not None:
+        keysfile = path
+        return keysfile
+
     try:
         user_entry = pwd.getpwnam(user)
-    except KeyError, e:
+    except KeyError:
+        e = get_exception()
+        if module.check_mode and path is None:
+            module.fail_json(msg="Either user must exist or you must provide full path to key file in check mode")
         module.fail_json(msg="Failed to lookup user %s: %s" % (user, str(e)))
     if path is None:
         homedir    = user_entry.pw_dir
@@ -188,11 +211,11 @@ def keyfile(module, user, write=False, path=None, manage_dir=True):
 
     if manage_dir:
         if not os.path.exists(sshdir):
-            os.mkdir(sshdir, 0700)
+            os.mkdir(sshdir, int('0700', 8))
             if module.selinux_enabled():
                 module.set_default_selinux_context(sshdir, False)
         os.chown(sshdir, uid, gid)
-        os.chmod(sshdir, 0700)
+        os.chmod(sshdir, int('0700', 8))
 
     if not os.path.exists(keysfile):
         basedir = os.path.dirname(keysfile)
@@ -207,32 +230,35 @@ def keyfile(module, user, write=False, path=None, manage_dir=True):
 
     try:
         os.chown(keysfile, uid, gid)
-        os.chmod(keysfile, 0600)
+        os.chmod(keysfile, int('0600', 8))
     except OSError:
         pass
 
     return keysfile
 
 def parseoptions(module, options):
-    ''' 
-    reads a string containing ssh-key options 
+    '''
+    reads a string containing ssh-key options
     and returns a dictionary of those options
     '''
     options_dict = keydict() #ordered dict
     if options:
-        try:
-            # the following regex will split on commas while
-            # ignoring those commas that fall within quotes
-            regex = re.compile(r'''((?:[^,"']|"[^"]*"|'[^']*')+)''')
-            parts = regex.split(options)[1:-1]
-            for part in parts:
-                if "=" in part:
-                    (key, value) = part.split("=", 1)
+        # the following regex will split on commas while
+        # ignoring those commas that fall within quotes
+        regex = re.compile(r'''((?:[^,"']|"[^"]*"|'[^']*')+)''')
+        parts = regex.split(options)[1:-1]
+        for part in parts:
+            if "=" in part:
+                (key, value) = part.split("=", 1)
+                if key in options_dict:
+                    if isinstance(options_dict[key], list):
+                        options_dict[key].append(value)
+                    else:
+                        options_dict[key] = [options_dict[key], value]
+                else:
                     options_dict[key] = value
-                elif part != ",":
-                    options_dict[part] = None
-        except:
-            module.fail_json(msg="invalid option string: %s" % options)
+            elif part != ",":
+                options_dict[part] = None
 
     return options_dict
 
@@ -246,7 +272,7 @@ def parsekey(module, raw_key):
         'ssh-ed25519',
         'ecdsa-sha2-nistp256',
         'ecdsa-sha2-nistp384',
-        'ecdsa-sha2-nistp521', 
+        'ecdsa-sha2-nistp521',
         'ssh-dss',
         'ssh-rsa',
     ]
@@ -322,17 +348,21 @@ def writekeys(module, filename, keys):
                     option_strings = []
                     for option_key in options.keys():
                         if options[option_key]:
-                            option_strings.append("%s=%s" % (option_key, options[option_key]))
+                            if isinstance(options[option_key], list):
+                                for value in options[option_key]:
+                                    option_strings.append("%s=%s" % (option_key, value))
+                            else:
+                                option_strings.append("%s=%s" % (option_key, options[option_key]))
                         else:
                             option_strings.append("%s" % option_key)
-
                     option_str = ",".join(option_strings)
                     option_str += " "
                 key_line = "%s%s %s %s\n" % (option_str, type, keyhash, comment)
             except:
                 key_line = key
             f.writelines(key_line)
-    except IOError, e:
+    except IOError:
+        e = get_exception()
         module.fail_json(msg="Failed to write to file %s: %s" % (tmp_path, str(e)))
     f.close()
     module.atomic_move(tmp_path, filename)
@@ -349,6 +379,7 @@ def enforce_state(module, params):
     state       = params.get("state", "present")
     key_options = params.get("key_options", None)
     exclusive   = params.get("exclusive", False)
+    validate_certs = params.get("validate_certs", True)
     error_msg   = "Error getting key from: %s"
 
     # if the key is a url, request it and use it as key source
@@ -377,12 +408,13 @@ def enforce_state(module, params):
     # Check our new keys, if any of them exist we'll continue.
     for new_key in key:
         parsed_new_key = parsekey(module, new_key)
-        if key_options is not None:
-            parsed_options = parseoptions(module, key_options)
-            parsed_new_key = (parsed_new_key[0], parsed_new_key[1], parsed_options, parsed_new_key[3])
 
         if not parsed_new_key:
             module.fail_json(msg="invalid key specified: %s" % new_key)
+
+        if key_options is not None:
+            parsed_options = parseoptions(module, key_options)
+            parsed_new_key = (parsed_new_key[0], parsed_new_key[1], parsed_options, parsed_new_key[3])
 
         present = False
         matched = False
@@ -450,6 +482,7 @@ def main():
            key_options = dict(required=False, type='str'),
            unique      = dict(default=False, type='bool'),
            exclusive   = dict(default=False, type='bool'),
+           validate_certs = dict(default=True, type='bool'),
         ),
         supports_check_mode=True
     )
@@ -458,6 +491,7 @@ def main():
     module.exit_json(**results)
 
 # import module snippets
-from ansible.module_utils.basic import *
-from ansible.module_utils.urls import *
+from ansible.module_utils.basic import AnsibleModule
+from ansible.module_utils.urls import fetch_url
+from ansible.module_utils.pycompat24 import get_exception
 main()

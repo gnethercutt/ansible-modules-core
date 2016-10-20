@@ -22,6 +22,7 @@ DOCUMENTATION = '''
 ---
 module: accelerate
 short_description: Enable accelerated mode on remote node
+deprecated: "in favor of SSH with ControlPersist"
 description:
      - This modules launches an ephemeral I(accelerate) daemon on the remote node which
        Ansible can use to communicate with nodes at high speed.
@@ -63,8 +64,10 @@ options:
     version_added: "1.6"
 notes:
     - See the advanced playbooks chapter for more about using accelerated mode.
-requirements: [ "python-keyczar" ]
-author: James Cammarata
+requirements:
+    - "python >= 2.4"
+    - "python-keyczar"
+author: "James Cammarata (@jimi-c)"
 '''
 
 EXAMPLES = '''
@@ -96,14 +99,12 @@ import traceback
 
 import SocketServer
 
-from datetime import datetime
+import datetime
 from threading import Thread, Lock
 
 # import module snippets
 # we must import this here at the top so we can use get_module_path()
 from ansible.module_utils.basic import *
-
-syslog.openlog('ansible-%s' % os.path.basename(__file__))
 
 # the chunk size to read and send, assuming mtu 1500 and 
 # leaving room for base64 (+33%) encoding and header (100 bytes)
@@ -166,14 +167,15 @@ def daemonize_self(module, password, port, minutes, pid_file):
             vvv("exiting pid %s" % pid)
             # exit first parent
             module.exit_json(msg="daemonized accelerate on port %s for %s minutes with pid %s" % (port, minutes, str(pid)))
-    except OSError, e:
-        log("fork #1 failed: %d (%s)" % (e.errno, e.strerror))
-        sys.exit(1)
+    except OSError:
+        e       = get_exception()
+        message = "fork #1 failed: %d (%s)" % (e.errno, e.strerror)
+        module.fail_json(msg=message)
 
     # decouple from parent environment
     os.chdir("/")
     os.setsid()
-    os.umask(022)
+    os.umask(int('O22', 8))
 
     # do second fork
     try:
@@ -185,8 +187,9 @@ def daemonize_self(module, password, port, minutes, pid_file):
             pid_file.close()
             vvv("pid file written")
             sys.exit(0)
-    except OSError, e:
-        log("fork #2 failed: %d (%s)" % (e.errno, e.strerror))
+    except OSError:
+        e       = get_exception()
+        log('fork #2 failed: %d (%s)' % (e.errno, e.strerror))
         sys.exit(1)
 
     dev_null = file('/dev/null','rw')
@@ -217,9 +220,9 @@ class LocalSocketThread(Thread):
                         # make sure the directory is accessible only to this
                         # user, as socket files derive their permissions from
                         # the directory that contains them
-                        os.chmod(dir, 0700)
+                        os.chmod(dir, int('0700', 8))
                 elif not os.path.exists(dir):
-                    os.makedirs(dir, 0700)
+                    os.makedirs(dir, int('O700', 8))
         except OSError:
             pass
         self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -233,33 +236,35 @@ class LocalSocketThread(Thread):
                 while "\n" not in data:
                     data += conn.recv(2048)
                 try:
-                    new_key = AesKey.Read(data.strip())
-                    found = False
-                    for key in self.server.key_list:
-                        try:
-                            new_key.Decrypt(key.Encrypt("foo"))
-                            found = True
-                            break
-                        except:
-                            pass
-                    if not found:
-                        vv("adding new key to the key list")
-                        self.server.key_list.append(new_key)
-                        conn.sendall("OK\n")
-                    else:
-                        vv("key already exists in the key list, ignoring")
-                        conn.sendall("EXISTS\n")
-
-                    # update the last event time so the server doesn't
-                    # shutdown sooner than expected for new cliets
                     try:
-                        self.server.last_event_lock.acquire()
-                        self.server.last_event = datetime.now()
-                    finally:
-                        self.server.last_event_lock.release()
-                except Exception, e:
-                    vv("key loaded locally was invalid, ignoring (%s)" % e)
-                    conn.sendall("BADKEY\n")
+                        new_key = AesKey.Read(data.strip())
+                        found = False
+                        for key in self.server.key_list:
+                            try:
+                                new_key.Decrypt(key.Encrypt("foo"))
+                                found = True
+                                break
+                            except:
+                                pass
+                        if not found:
+                            vv("adding new key to the key list")
+                            self.server.key_list.append(new_key)
+                            conn.sendall("OK\n")
+                        else:
+                            vv("key already exists in the key list, ignoring")
+                            conn.sendall("EXISTS\n")
+
+                        # update the last event time so the server doesn't
+                        # shutdown sooner than expected for new clients
+                        try:
+                            self.server.last_event_lock.acquire()
+                            self.server.last_event = datetime.datetime.now()
+                        finally:
+                            self.server.last_event_lock.release()
+                    except Exception:
+                        e = get_exception()
+                        vv("key loaded locally was invalid, ignoring (%s)" % e)
+                        conn.sendall("BADKEY\n")
                 finally:
                     try:
                         conn.close()
@@ -269,6 +274,7 @@ class LocalSocketThread(Thread):
                 pass
 
     def terminate(self):
+        super(LocalSocketThread, self).terminate()
         self.terminated = True
         self.s.shutdown(socket.SHUT_RDWR)
         self.s.close()
@@ -289,7 +295,7 @@ class ThreadWithReturnValue(Thread):
 
 class ThreadedTCPServer(SocketServer.ThreadingTCPServer):
     key_list = []
-    last_event = datetime.now()
+    last_event = datetime.datetime.now()
     last_event_lock = Lock()
     def __init__(self, server_address, RequestHandlerClass, module, password, timeout, use_ipv6=False):
         self.module = module
@@ -308,7 +314,6 @@ class ThreadedTCPServer(SocketServer.ThreadingTCPServer):
         SocketServer.ThreadingTCPServer.__init__(self, server_address, RequestHandlerClass)
 
     def shutdown(self):
-        self.local_thread.terminate()
         self.running = False
         SocketServer.ThreadingTCPServer.shutdown(self)
 
@@ -319,7 +324,7 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
     def send_data(self, data):
         try:
             self.server.last_event_lock.acquire()
-            self.server.last_event = datetime.now()
+            self.server.last_event = datetime.datetime.now()
         finally:
             self.server.last_event_lock.release()
 
@@ -361,7 +366,7 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
 
         try:
             self.server.last_event_lock.acquire()
-            self.server.last_event = datetime.now()
+            self.server.last_event = datetime.datetime.now()
         finally:
             self.server.last_event_lock.release()
 
@@ -399,15 +404,15 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
 
                 mode = data['mode']
                 response = {}
-                last_pong = datetime.now()
+                last_pong = datetime.datetime.now()
                 if mode == 'command':
                     vvvv("received a command request, running it")
                     twrv = ThreadWithReturnValue(target=self.command, args=(data,))
                     twrv.start()
                     response = None
                     while twrv.is_alive():
-                        if (datetime.now() - last_pong).seconds >= 15:
-                            last_pong = datetime.now()
+                        if (datetime.datetime.now() - last_pong).seconds >= 15:
+                            last_pong = datetime.datetime.now()
                             vvvv("command still running, sending keepalive packet")
                             data2 = json.dumps(dict(pong=True))
                             data2 = self.active_key.Encrypt(data2)
@@ -469,8 +474,6 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
     def command(self, data):
         if 'cmd' not in data:
             return dict(failed=True, msg='internal error: cmd is required')
-        if 'tmp_path' not in data:
-            return dict(failed=True, msg='internal error: tmp_path is required')
 
         vvvv("executing: %s" % data['cmd'])
 
@@ -519,7 +522,8 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
                 if response.get('failed',False):
                     log("got a failed response from the master")
                     return dict(failed=True, stderr="Master reported failure, aborting transfer")
-        except Exception, e:
+        except Exception:
+            e = get_exception()
             fd.close()
             tb = traceback.format_exc()
             log("failed to fetch the file: %s" % tb)
@@ -540,7 +544,7 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
             tmp_path = os.path.expanduser('~/.ansible/tmp/')
             if not os.path.exists(tmp_path):
                 try:
-                    os.makedirs(tmp_path, 0700)
+                    os.makedirs(tmp_path, int('O700', 8))
                 except:
                     return dict(failed=True, msg='could not create a temporary directory at %s' % tmp_path)
             (fd,out_path) = tempfile.mkstemp(prefix='ansible.', dir=tmp_path)
@@ -586,26 +590,26 @@ def daemonize(module, password, port, timeout, minutes, use_ipv6, pid_file):
 
         def timer_handler(signum, _):
             try:
-                server.last_event_lock.acquire()
-                td = datetime.now() - server.last_event
-                # older python timedelta objects don't have total_seconds(),
-                # so we use the formula from the docs to calculate it
-                total_seconds = (td.microseconds + (td.seconds + td.days * 24 * 3600) * 10**6) / 10**6
-                if total_seconds >= minutes * 60:
-                    log("server has been idle longer than the timeout, shutting down")
-                    server.running = False
-                    server.shutdown()
-                else:
-                    # reschedule the check
-                    vvvv("daemon idle for %d seconds (timeout=%d)" % (total_seconds,minutes*60))
-                    signal.alarm(30)
-            except:
-                pass
+                try:
+                    server.last_event_lock.acquire()
+                    td = datetime.datetime.now() - server.last_event
+                    # older python timedelta objects don't have total_seconds(),
+                    # so we use the formula from the docs to calculate it
+                    total_seconds = (td.microseconds + (td.seconds + td.days * 24 * 3600) * 10**6) / 10**6
+                    if total_seconds >= minutes * 60:
+                        log("server has been idle longer than the timeout, shutting down")
+                        server.running = False
+                        server.shutdown()
+                    else:
+                        # reschedule the check
+                        signal.alarm(1)
+                except:
+                    pass
             finally:
                 server.last_event_lock.release()
 
         signal.signal(signal.SIGALRM, timer_handler)
-        signal.alarm(30)
+        signal.alarm(1)
 
         tries = 5
         while tries > 0:
@@ -617,11 +621,12 @@ def daemonize(module, password, port, timeout, minutes, use_ipv6, pid_file):
                 server = ThreadedTCPServer(address, ThreadedTCPRequestHandler, module, password, timeout, use_ipv6=use_ipv6)
                 server.allow_reuse_address = True
                 break
-            except Exception, e:
+            except Exception:
+                e = get_exception()
                 vv("Failed to create the TCP server (tries left = %d) (error: %s) " % (tries,e))
             tries -= 1
             time.sleep(0.2)
-        
+
         if tries == 0:
             vv("Maximum number of attempts to create the TCP server reached, bailing out")
             raise Exception("max # of attempts to serve reached")
@@ -640,7 +645,8 @@ def daemonize(module, password, port, timeout, minutes, use_ipv6, pid_file):
 
         v("server thread terminated, exiting!")
         sys.exit(0)
-    except Exception, e:
+    except Exception:
+        e = get_exception()
         tb = traceback.format_exc()
         log("exception caught, exiting accelerated mode: %s\n%s" % (e, tb))
         sys.exit(0)
@@ -659,6 +665,8 @@ def main():
         ),
         supports_check_mode=True
     )
+
+    syslog.openlog('ansible-%s' % module._name)
 
     password  = base64.b64decode(module.params['password'])
     port      = int(module.params['port'])
@@ -684,11 +692,16 @@ def main():
                 # process, other than tell the calling program
                 # whether other signals can be sent
                 os.kill(daemon_pid, 0)
-            except OSError, e:
+            except OSError:
+                e        = get_exception()
+                message  = 'the accelerate daemon appears to be running'
+                message += 'as a different user that this user cannot access'
+                message += 'pid=%s' % daemon_pid
+
                 if e.errno == errno.EPERM:
                     # no permissions means the pid is probably
                     # running, but as a different user, so fail
-                    module.fail_json(msg="the accelerate daemon appears to be running as a different user that this user cannot access (pid=%d)" % daemon_pid)
+                    module.fail_json(msg=message)
             else:
                 daemon_running = True
         except ValueError:
@@ -702,14 +715,15 @@ def main():
         # try to connect to the file socket for the daemon if it exists
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            s.connect(SOCKET_FILE)
-            s.sendall(password + '\n')
-            data = ""
-            while '\n' not in data:
-                data += s.recv(2048)
-            res = data.strip()
-        except:
-            module.fail_json(msg="failed to connect to the local socket file")
+            try:
+                s.connect(SOCKET_FILE)
+                s.sendall(password + '\n')
+                data = ""
+                while '\n' not in data:
+                    data += s.recv(2048)
+                res = data.strip()
+            except:
+                module.fail_json(msg="failed to connect to the local socket file")
         finally:
             try:
                 s.close()

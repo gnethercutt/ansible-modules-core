@@ -17,18 +17,22 @@
 # You should have received a copy of the GNU General Public License
 # along with this software.  If not, see <http://www.gnu.org/licenses/>.
 
+import time
 try:
     from novaclient.v1_1 import client as nova_client
     from novaclient import exceptions as exc
-    import time
+    HAS_NOVACLIENT = True
 except ImportError:
-    print("failed=True msg='novaclient is required for this module to work'")
+    HAS_NOVACLIENT = False
 
 DOCUMENTATION = '''
 ---
 module: nova_keypair
 version_added: "1.2"
-deprecated: Deprecated in 1.9. Use os_keypair instead
+author: 
+    - "Benno Joy (@bennojoy)"
+    - "Michael DeHaan"
+deprecated: Deprecated in 2.0. Use os_keypair instead
 short_description: Add/Delete key pair from nova
 description:
    - Add or Remove key pair from nova .
@@ -74,7 +78,9 @@ options:
      required: false
      default: None
 
-requirements: ["novaclient"]
+requirements:
+    - "python >= 2.6"
+    - "python-novaclient"
 '''
 EXAMPLES = '''
 # Creates a key pair with the running users public key
@@ -95,6 +101,8 @@ def main():
         state                           = dict(default='present', choices=['absent', 'present'])
     ))
     module = AnsibleModule(argument_spec=argument_spec)
+    if not HAS_NOVACLIENT:
+        module.fail_json(msg='python-novaclient is required for this module to work')
 
     nova = nova_client.Client(module.params['login_username'],
                               module.params['login_password'],
@@ -104,9 +112,9 @@ def main():
                               service_type='compute')
     try:
         nova.authenticate()
-    except exc.Unauthorized, e:
+    except exc.Unauthorized as e:
         module.fail_json(msg = "Invalid OpenStack Nova credentials.: %s" % e.message)
-    except exc.AuthorizationFailure, e:
+    except exc.AuthorizationFailure as e:
         module.fail_json(msg = "Unable to authorize user: %s" % e.message)
 
     if module.params['state'] == 'present':
@@ -118,7 +126,7 @@ def main():
                     module.exit_json(changed = False, result = "Key present")            
         try:
             key = nova.keypairs.create(module.params['name'], module.params['public_key'])
-        except Exception, e:
+        except Exception as e:
             module.exit_json(msg = "Error in creating the keypair: %s" % e.message)
         if not module.params['public_key']:
             module.exit_json(changed = True, key = key.private_key)
@@ -128,7 +136,7 @@ def main():
             if key.name == module.params['name']:
                 try:
                     nova.keypairs.delete(module.params['name'])
-                except Exception, e:
+                except Exception as e:
                     module.fail_json(msg = "The keypair deletion has failed: %s" % e.message)
                 module.exit_json( changed = True, result = "deleted")
         module.exit_json(changed = False, result = "not present")
@@ -136,5 +144,6 @@ def main():
 # this is magic, see lib/ansible/module.params['common.py
 from ansible.module_utils.basic import *
 from ansible.module_utils.openstack import *
-main()
+if __name__ == '__main__':
+    main()
 

@@ -19,14 +19,14 @@ DOCUMENTATION = """
 module: ec2_lc
 short_description: Create or delete AWS Autoscaling Launch Configurations
 description:
-  - Can create or delete AwS Autoscaling Configurations
+  - Can create or delete AWS Autoscaling Configurations
   - Works with the ec2_asg module to manage Autoscaling Groups
 notes:
   - "Amazon ASG Autoscaling Launch Configurations are immutable once created, so modifying the configuration
     after it is changed will not modify the launch configuration on AWS. You must create a new config and assign
     it to the ASG instead."
 version_added: "1.6"
-author: Gareth Rushgrove
+author: "Gareth Rushgrove (@garethr)"
 options:
   state:
     description:
@@ -53,70 +53,64 @@ options:
     required: false
   security_groups:
     description:
-      - A list of security groups into which instances should be found
+      - A list of security groups to apply to the instances. For VPC instances, specify security group IDs. For EC2-Classic, specify either security group names or IDs.
     required: false
-  region:
-    description:
-      - The AWS region to use. If not specified then the value of the EC2_REGION environment variable, if any, is used.
-    required: false
-    aliases: ['aws_region', 'ec2_region']
   volumes:
     description:
       - a list of volume dicts, each containing device name and optionally ephemeral id or snapshot id. Size and type (and number of iops for io device type) must be specified for a new volume or a root volume, and may be passed for a snapshot volume. For any volume, a volume size less than 1 will be interpreted as a request not to create the volume.
     required: false
-    default: null
-    aliases: []
   user_data:
     description:
       - opaque blob of data which is made available to the ec2 instance
     required: false
-    default: null
-    aliases: []
   kernel_id:
     description:
       - Kernel id for the EC2 instance
     required: false
-    default: null
-    aliases: []    
   spot_price:
     description:
       - The spot price you are bidding. Only applies for an autoscaling group with spot instances.
     required: false
-    default: null
   instance_monitoring:
     description:
       - whether instances in group are launched with detailed monitoring.
-    required: false
     default: false
-    aliases: []
   assign_public_ip:
     description:
       - Used for Auto Scaling groups that launch instances into an Amazon Virtual Private Cloud. Specifies whether to assign a public IP address to each instance launched in a Amazon VPC.
     required: false
-    aliases: []
     version_added: "1.8"
   ramdisk_id:
     description:
       - A RAM disk id for the instances.
     required: false
-    default: null
-    aliases: []
     version_added: "1.8"
   instance_profile_name:
     description:
       - The name or the Amazon Resource Name (ARN) of the instance profile associated with the IAM role for the instances.
     required: false
-    default: null
-    aliases: []
     version_added: "1.8"
   ebs_optimized:
     description:
       - Specifies whether the instance is optimized for EBS I/O (true) or not (false).
     required: false
     default: false
-    aliases: []
     version_added: "1.8"
-extends_documentation_fragment: aws
+  classic_link_vpc_id:
+    description:
+      - Id of ClassicLink enabled VPC
+    required: false
+    version_added: "2.0"
+  classic_link_vpc_security_groups:
+    description:
+      - A list of security group id's with which to associate the ClassicLink VPC instances.
+    required: false
+    version_added: "2.0"
+extends_documentation_fragment:
+    - aws
+    - ec2
+requires: 
+    - "boto >= 2.39.0"
 """
 
 EXAMPLES = '''
@@ -126,11 +120,16 @@ EXAMPLES = '''
     key_name: default
     security_groups: ['group', 'group2' ]
     instance_type: t1.micro
+    volumes:
+    - device_name: /dev/sda1
+      volume_size: 100
+      device_type: io1
+      iops: 3000
+      delete_on_termination: true
+    - device_name: /dev/sdb
+      ephemeral: ephemeral0
 
 '''
-
-import sys
-import time
 
 from ansible.module_utils.basic import *
 from ansible.module_utils.ec2 import *
@@ -140,9 +139,9 @@ try:
     import boto.ec2.autoscale
     from boto.ec2.autoscale import LaunchConfiguration
     from boto.exception import BotoServerError
+    HAS_BOTO = True
 except ImportError:
-    print "failed=True msg='boto required for this module'"
-    sys.exit(1)
+    HAS_BOTO = False
 
 
 def create_block_device(module, volume):
@@ -181,6 +180,8 @@ def create_launch_config(connection, module):
     ramdisk_id = module.params.get('ramdisk_id')
     instance_profile_name = module.params.get('instance_profile_name')
     ebs_optimized = module.params.get('ebs_optimized')
+    classic_link_vpc_id = module.params.get('classic_link_vpc_id')
+    classic_link_vpc_security_groups = module.params.get('classic_link_vpc_security_groups')
     bdm = BlockDeviceMapping()
 
     if volumes:
@@ -203,10 +204,12 @@ def create_launch_config(connection, module):
         kernel_id=kernel_id,
         spot_price=spot_price,
         instance_monitoring=instance_monitoring,
-        associate_public_ip_address = assign_public_ip,
+        associate_public_ip_address=assign_public_ip,
         ramdisk_id=ramdisk_id,
         instance_profile_name=instance_profile_name,
         ebs_optimized=ebs_optimized,
+        classic_link_vpc_security_groups=classic_link_vpc_security_groups,
+        classic_link_vpc_id=classic_link_vpc_id,
     )
 
     launch_configs = connection.get_all_launch_configurations(names=[name])
@@ -216,13 +219,39 @@ def create_launch_config(connection, module):
             connection.create_launch_configuration(lc)
             launch_configs = connection.get_all_launch_configurations(names=[name])
             changed = True
-        except BotoServerError, e:
+        except BotoServerError as e:
             module.fail_json(msg=str(e))
-    result = launch_configs[0]
 
-    module.exit_json(changed=changed, name=result.name, created_time=str(result.created_time),
-                     image_id=result.image_id, arn=result.launch_configuration_arn,
-                     security_groups=result.security_groups, instance_type=instance_type)
+    result = dict(
+                 ((a[0], a[1]) for a in vars(launch_configs[0]).items()
+                  if a[0] not in ('connection', 'created_time', 'instance_monitoring', 'block_device_mappings'))
+                 )
+    result['created_time'] = str(launch_configs[0].created_time)
+    # Looking at boto's launchconfig.py, it looks like this could be a boolean
+    # value or an object with an enabled attribute.  The enabled attribute
+    # could be a boolean or a string representation of a boolean.  Since
+    # I can't test all permutations myself to see if my reading of the code is
+    # correct, have to code this *very* defensively
+    if launch_configs[0].instance_monitoring is True:
+        result['instance_monitoring'] = True
+    else:
+        try:
+            result['instance_monitoring'] = module.boolean(launch_configs[0].instance_monitoring.enabled)
+        except AttributeError:
+            result['instance_monitoring'] = False
+    if launch_configs[0].block_device_mappings is not None:
+        result['block_device_mappings'] = []
+        for bdm in launch_configs[0].block_device_mappings:
+            result['block_device_mappings'].append(dict(device_name=bdm.device_name, virtual_name=bdm.virtual_name))
+            if bdm.ebs is not None:
+                result['block_device_mappings'][-1]['ebs'] = dict(snapshot_id=bdm.ebs.snapshot_id, volume_size=bdm.ebs.volume_size)
+
+
+    module.exit_json(changed=changed, name=result['name'], created_time=result['created_time'],
+                     image_id=result['image_id'], arn=result['launch_configuration_arn'],
+                     security_groups=result['security_groups'],
+                     instance_type=result['instance_type'],
+                     result=result)
 
 
 def delete_launch_config(connection, module):
@@ -254,17 +283,22 @@ def main():
             ebs_optimized=dict(default=False, type='bool'),
             associate_public_ip_address=dict(type='bool'),
             instance_monitoring=dict(default=False, type='bool'),
-            assign_public_ip=dict(type='bool')
+            assign_public_ip=dict(type='bool'),
+            classic_link_vpc_security_groups=dict(type='list'),
+            classic_link_vpc_id=dict(type='str')
         )
     )
 
     module = AnsibleModule(argument_spec=argument_spec)
 
+    if not HAS_BOTO:
+        module.fail_json(msg='boto required for this module')
+
     region, ec2_url, aws_connect_params = get_aws_connection_info(module)
 
     try:
         connection = connect_to_aws(boto.ec2.autoscale, region, **aws_connect_params)
-    except (boto.exception.NoAuthHandlerFound, StandardError), e:
+    except (boto.exception.NoAuthHandlerFound, AnsibleAWSError) as e:
         module.fail_json(msg=str(e))
 
     state = module.params.get('state')

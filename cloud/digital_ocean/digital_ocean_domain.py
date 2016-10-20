@@ -22,18 +22,17 @@ short_description: Create/delete a DNS record in DigitalOcean
 description:
      - Create/delete a DNS record in DigitalOcean.
 version_added: "1.6"
+author: "Michael Gregson (@mgregson)"
 options:
   state:
     description:
      - Indicate desired state of the target.
     default: present
     choices: ['present', 'absent']
-  client_id:
-     description:
-     - DigitalOcean manager id.
-  api_key:
+  api_token:
     description:
-     - DigitalOcean api key.
+     - DigitalOcean api token.
+    version_added: "1.9.5"
   id:
     description:
      - Numeric, the droplet id you want to operate on.
@@ -45,52 +44,59 @@ options:
      - The IP address to point a domain at.
 
 notes:
-  - Two environment variables can be used, DO_CLIENT_ID and DO_API_KEY.
+  - Two environment variables can be used, DO_API_KEY and DO_API_TOKEN. They both refer to the v2 token.
+  - As of Ansible 1.9.5 and 2.0, Version 2 of the DigitalOcean API is used, this removes C(client_id) and C(api_key) options in favor of C(api_token).
+  - If you are running Ansible 1.9.4 or earlier you might not be able to use the included version of this module as the API version used has been retired.
+
+requirements:
+  - "python >= 2.6"
+  - dopy
 '''
 
 
 EXAMPLES = '''
 # Create a domain record
 
-- digital_ocean_domain: >
-      state=present
-      name=my.digitalocean.domain
-      ip=127.0.0.1
+- digital_ocean_domain:
+    state: present
+    name: my.digitalocean.domain
+    ip: 127.0.0.1
 
 # Create a droplet and a corresponding domain record
 
-- digital_ocean: >
-      state=present
-      name=test_droplet
-      size_id=1
-      region_id=2
-      image_id=3
+- digital_ocean:
+    state: present
+    name: test_droplet
+    size_id: 1gb
+    region_id: sgp1
+    image_id: ubuntu-14-04-x64
+
+
   register: test_droplet
 
-- digital_ocean_domain: >
-      state=present
-      name={{ test_droplet.droplet.name }}.my.domain
-      ip={{ test_droplet.droplet.ip_address }}
+- digital_ocean_domain:
+    state: present
+    name: "{{ test_droplet.droplet.name }}.my.domain"
+    ip: "{{ test_droplet.droplet.ip_address }}"
+
 '''
 
-import sys
 import os
-import time
+import traceback
 
 try:
     from dopy.manager import DoError, DoManager
+    HAS_DOPY = True
 except ImportError as e:
-    print "failed=True msg='dopy required for this module'"
-    sys.exit(1)
+    HAS_DOPY = False
 
-class TimeoutError(DoError):
-    def __init__(self, msg, id):
-        super(TimeoutError, self).__init__(msg)
-        self.id = id
+from ansible.module_utils.basic import AnsibleModule
+
 
 class JsonfyMixIn(object):
     def to_json(self):
         return self.__dict__
+
 
 class DomainRecord(JsonfyMixIn):
     manager = None
@@ -99,7 +105,7 @@ class DomainRecord(JsonfyMixIn):
         self.__dict__.update(json)
     update_attr = __init__
 
-    def update(self, data = None, record_type = None):
+    def update(self, data=None, record_type=None):
         json = self.manager.edit_domain_record(self.domain_id,
                                                self.id,
                                                record_type if record_type is not None else self.record_type,
@@ -111,6 +117,7 @@ class DomainRecord(JsonfyMixIn):
         json = self.manager.destroy_domain_record(self.domain_id, self.id)
         return json
 
+
 class Domain(JsonfyMixIn):
     manager = None
 
@@ -118,10 +125,10 @@ class Domain(JsonfyMixIn):
         self.__dict__.update(domain_json)
 
     def destroy(self):
-        self.manager.destroy_domain(self.id)
+        self.manager.destroy_domain(self.name)
 
     def records(self):
-        json = self.manager.all_domain_records(self.id)
+        json = self.manager.all_domain_records(self.name)
         return map(DomainRecord, json)
 
     @classmethod
@@ -130,8 +137,8 @@ class Domain(JsonfyMixIn):
         return cls(json)
 
     @classmethod
-    def setup(cls, client_id, api_key):
-        cls.manager = DoManager(client_id, api_key)
+    def setup(cls, api_token):
+        cls.manager = DoManager(None, api_token, api_version=2)
         DomainRecord.manager = cls.manager
 
     @classmethod
@@ -158,6 +165,7 @@ class Domain(JsonfyMixIn):
 
         return False
 
+
 def core(module):
     def getkeyordie(k):
         v = module.params[k]
@@ -166,16 +174,13 @@ def core(module):
         return v
 
     try:
-        # params['client_id'] will be None even if client_id is not passed in
-        client_id = module.params['client_id'] or os.environ['DO_CLIENT_ID']
-        api_key = module.params['api_key'] or os.environ['DO_API_KEY']
-    except KeyError, e:
+        api_token = module.params['api_token'] or os.environ['DO_API_TOKEN'] or os.environ['DO_API_KEY']
+    except KeyError as e:
         module.fail_json(msg='Unable to load %s' % e.message)
 
-    changed = True
     state = module.params['state']
 
-    Domain.setup(client_id, api_key)
+    Domain.setup(api_token)
     if state in ('present'):
         domain = Domain.find(id=module.params["id"])
 
@@ -190,12 +195,12 @@ def core(module):
             records = domain.records()
             at_record = None
             for record in records:
-                if record.name == "@":
+                if record.name == "@" and record.type == 'A':
                     at_record = record
 
             if not at_record.data == getkeyordie("ip"):
                 record.update(data=getkeyordie("ip"), record_type='A')
-                module.exit_json(changed=True, domain=Domain.find(id=record.domain_id).to_json())
+                module.exit_json(changed=True, domain=Domain.find(id=record.id).to_json())
 
         module.exit_json(changed=False, domain=domain.to_json())
 
@@ -218,8 +223,7 @@ def main():
     module = AnsibleModule(
         argument_spec = dict(
             state = dict(choices=['present', 'absent'], default='present'),
-            client_id = dict(aliases=['CLIENT_ID'], no_log=True),
-            api_key = dict(aliases=['API_KEY'], no_log=True),
+            api_token = dict(aliases=['API_TOKEN'], no_log=True),
             name = dict(type='str'),
             id = dict(aliases=['droplet_id'], type='int'),
             ip = dict(type='str'),
@@ -228,15 +232,13 @@ def main():
             ['id', 'name'],
         ),
     )
+    if not HAS_DOPY:
+        module.fail_json(msg='dopy required for this module')
 
     try:
         core(module)
-    except TimeoutError as e:
-        module.fail_json(msg=str(e), id=e.id)
     except (DoError, Exception) as e:
-        module.fail_json(msg=str(e))
+        module.fail_json(msg=str(e), exception=traceback.format_exc())
 
-# import module snippets
-from ansible.module_utils.basic import *
-
-main()
+if __name__ == '__main__':
+    main()

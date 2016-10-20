@@ -29,14 +29,14 @@ options:
         required: false
         default: 'yes'
         choices: ['yes', 'no']
-        version_added: 1.5.1
+        version_added: '1.5.1'
 description:
      - This module fetches data from the metadata servers in ec2 (aws) as per
        http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-metadata.html.
        The module must be called from within the EC2 instance itself.
 notes:
     - Parameters to filter on ec2_facts may be added later.
-author: "Silviu Dicu <silviudicu@gmail.com>"
+author: "Silviu Dicu (@silviud) <silviudicu@gmail.com>"
 '''
 
 EXAMPLES = '''
@@ -48,23 +48,25 @@ EXAMPLES = '''
   action: debug msg="This instance is a t1.micro"
   when: ansible_ec2_instance_type == "t1.micro"
 '''
-   
+
 import socket
 import re
 import json
 
 socket.setdefaulttimeout(5)
 
-class Ec2Metadata(object):
 
+class Ec2Metadata(object):
     ec2_metadata_uri = 'http://169.254.169.254/latest/meta-data/'
-    ec2_sshdata_uri  = 'http://169.254.169.254/latest/meta-data/public-keys/0/openssh-key'
+    ec2_sshdata_uri = 'http://169.254.169.254/latest/meta-data/public-keys/0/openssh-key'
     ec2_userdata_uri = 'http://169.254.169.254/latest/user-data/'
     ec2_dynamic_uri  = 'http://169.254.169.254/latest/dynamic/'
 
     AWS_REGIONS = ('ap-northeast-1',
+                   'ap-northeast-2',
                    'ap-southeast-1',
                    'ap-southeast-2',
+                   'ap-south-1',
                    'eu-central-1',
                    'eu-west-1',
                    'sa-east-1',
@@ -80,8 +82,8 @@ class Ec2Metadata(object):
         self.uri_user = ec2_userdata_uri or self.ec2_userdata_uri
         self.uri_ssh  =  ec2_sshdata_uri or self.ec2_sshdata_uri
         self.uri_dyn  =  ec2_dynamic_uri or self.ec2_dynamic_uri
-        self._data     = {}
-        self._prefix   = 'ansible_ec2_%s'
+        self._data    = {}
+        self._prefix  = 'ansible_ec2_%s'
 
     def _fetch(self, url):
         (response, info) = fetch_url(self.module, url, force=True)
@@ -104,7 +106,7 @@ class Ec2Metadata(object):
         for pattern in filter_patterns:
             for key in new_fields.keys():
                 match = re.search(pattern, key)
-                if match: 
+                if match:
                     new_fields.pop(key)
         return new_fields
 
@@ -124,7 +126,7 @@ class Ec2Metadata(object):
                 content = self._fetch(new_uri)
                 if field == 'security-groups':
                     sg_fields = ",".join(content.split('\n'))
-                    self._data['%s' % (new_uri)]  = sg_fields
+                    self._data['%s' % (new_uri)] = sg_fields
                 else:
                     if field == 'document':
                         decoded = json.loads(content)
@@ -137,7 +139,7 @@ class Ec2Metadata(object):
         """Change ':'' and '-' to '_' to ensure valid template variable names"""
         for (key, value) in data.items():
             if ':' in key or '-' in key:
-                newkey = key.replace(':','_').replace('-','_')
+                newkey = key.replace(':', '_').replace('-', '_')
                 del data[key]
                 data[newkey] = value
 
@@ -164,7 +166,7 @@ class Ec2Metadata(object):
             data['ansible_ec2_placement_region'] = region
 
     def run(self):
-        self.fetch(self.uri_meta) # populate _data
+        self.fetch(self.uri_meta)  # populate _data
         data = self._mangle_fields(self._data, self.uri_meta)
 
         self._data = {} # clear out accumulated _data, get more
@@ -177,18 +179,20 @@ class Ec2Metadata(object):
         self.add_ec2_region(data)
         return data
 
+
 def main():
     argument_spec = url_argument_spec()
 
     module = AnsibleModule(
-        argument_spec = argument_spec,
-        supports_check_mode = True,
+            argument_spec=argument_spec,
+            supports_check_mode=True,
     )
 
     ec2_facts = Ec2Metadata(module).run()
     ec2_facts_result = dict(changed=False, ansible_facts=ec2_facts)
 
     module.exit_json(**ec2_facts_result)
+
 
 # import module snippets
 from ansible.module_utils.basic import *

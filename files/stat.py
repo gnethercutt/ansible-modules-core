@@ -27,27 +27,43 @@ options:
       - The full path of the file/object to get the facts of
     required: true
     default: null
-    aliases: []
   follow:
     description:
       - Whether to follow symlinks
     required: false
     default: no
-    aliases: []
   get_md5:
     description:
-      - Whether to return the md5 sum of the file.  Will return None if we're unable to use md5 (Common for FIPS-140 compliant systems)
+      - Whether to return the md5 sum of the file.  Will return None if we're
+        unable to use md5 (Common for FIPS-140 compliant systems)
     required: false
     default: yes
-    aliases: []
   get_checksum:
     description:
-      - Whether to return a checksum of the file (currently sha1)
+      - Whether to return a checksum of the file (default sha1)
     required: false
     default: yes
-    aliases: []
     version_added: "1.8"
-author: Bruce Pennypacker
+  checksum_algorithm:
+    description:
+      - Algorithm to determine checksum of file. Will throw an error if the
+        host is unable to use specified algorithm.
+    required: false
+    choices: [ 'sha1', 'sha224', 'sha256', 'sha384', 'sha512' ]
+    default: sha1
+    aliases: [ 'checksum_algo', 'checksum' ]
+    version_added: "2.0"
+  mime:
+    description:
+      - Use file magic and return data about the nature of the file. this uses
+        the 'file' utility found on most Linux/Unix systems.
+      - This will add both `mime_type` and 'charset' fields to the return, if possible.
+    required: false
+    choices: [ Yes, No ]
+    default: No
+    version_added: "2.1"
+    aliases: [ 'mime_type', 'mime-type' ]
+author: "Bruce Pennypacker (@bpennypacker)"
 '''
 
 EXAMPLES = '''
@@ -58,6 +74,23 @@ EXAMPLES = '''
 - fail: msg="Whoops! file ownership has changed"
   when: st.stat.pw_name != 'root'
 
+# Determine if a path exists and is a symlink. Note that if the path does
+# not exist, and we test sym.stat.islnk, it will fail with an error. So
+# therefore, we must test whether it is defined.
+# Run this to understand the structure, the skipped ones do not pass the
+# check performed by 'when'
+- stat: path=/path/to/something
+  register: sym
+- debug: msg="islnk isn't defined (path doesn't exist)"
+  when: sym.stat.islnk is not defined
+- debug: msg="islnk is defined (path must exist)"
+  when: sym.stat.islnk is defined
+- debug: msg="Path exists and is a symlink"
+  when: sym.stat.islnk is defined and sym.stat.islnk
+- debug: msg="Path exists and isn't a symlink"
+  when: sym.stat.islnk is defined and sym.stat.islnk == False
+
+
 # Determine if a path exists and is a directory.  Note that we need to test
 # both that p.stat.isdir actually exists, and also that it's set to true.
 - stat: path=/path/to/something
@@ -67,6 +100,9 @@ EXAMPLES = '''
 
 # Don't do md5 checksum
 - stat: path=/path/to/myhugefile get_md5=no
+
+# Use sha256 to calculate checksum
+- stat: path=/path/to/something checksum_algorithm=sha256
 '''
 
 RETURN = '''
@@ -83,7 +119,7 @@ stat:
         path:
             description: The full path of the file/object to get the facts of
             returned: success and if path exists
-            type: boolean
+            type: string
             sample: '/path/to/file'
         mode:
             description: Unix permissions of the file in octal
@@ -136,7 +172,7 @@ stat:
             type: int
             sample: 1003
         size:
-            description: Size in bytes for a plain file, ammount of data for some special files
+            description: Size in bytes for a plain file, amount of data for some special files
             returned: success, path exists and user can read stats
             type: int
             sample: 203
@@ -228,18 +264,20 @@ stat:
         lnk_source:
             description: Original path
             returned: success, path exists and user can read stats and the path is a symbolic link
-            type: boolean
-            sample: True
+            type: string
+            sample: /home/foobar/21102015-1445431274-908472971
         md5:
             description: md5 hash of the path
-            returned: success, path exists and user can read stats and path supports hashing and md5 is supported
-            type: boolean
-            sample: True
+            returned: success, path exists and user can read stats and path
+                supports hashing and md5 is supported
+            type: string
+            sample: f88fa92d8cf2eeecf4c0a50ccc96d0c0
         checksum:
             description: hash of the path
-            returned: success, path exists and user can read stats and path supports hashing
-            type: boolean
-            sample: True
+            returned: success, path exists, user can read stats, path supports
+                hashing and supplied checksum algorithm is available
+            type: string
+            sample: 50ba294cdf28c0d5bcde25708df53346825a429f
         pw_name:
             description: User name of owner
             returned: success, path exists and user can read stats and installed python supports it
@@ -250,107 +288,177 @@ stat:
             returned: success, path exists and user can read stats and installed python supports it
             type: string
             sample: www-data
+        mime_type:
+            description: file magic data or mime-type
+            returned: success, path exists and user can read stats and
+                installed python supports it and the `mime` option was true, will
+                return 'unknown' on error.
+            type: string
+            sample: PDF document, version 1.2
+        charset:
+            description: file character set or encoding
+            returned: success, path exists and user can read stats and
+                installed python supports it and the `mime` option was true, will
+                return 'unknown' on error.
+            type: string
+            sample: us-ascii
+        readable:
+            description: Tells you if the invoking user has the right to read the path
+            returned: success, path exists and user can read the path
+            type: boolean
+            sample: False
+        writeable:
+            description: Tells you if the invoking user has the right to write the path
+            returned: success, path exists and user can write the path
+            type: boolean
+            sample: False
+        executable:
+            description: Tells you if the invoking user has the execute the path
+            returned: success, path exists and user can execute the path
+            type: boolean
+            sample: False
 '''
 
-import os
-import sys
-from stat import *
-import pwd
+import errno
 import grp
+import os
+import pwd
+import stat
 
-def main():
-    module = AnsibleModule(
-        argument_spec = dict(
-            path = dict(required=True),
-            follow = dict(default='no', type='bool'),
-            get_md5 = dict(default='yes', type='bool'),
-            get_checksum = dict(default='yes', type='bool')
-        ),
-        supports_check_mode = True
-    )
+# import module snippets
+from ansible.module_utils.basic import AnsibleModule
+from ansible.module_utils.pycompat24 import get_exception
+from ansible.module_utils._text import to_bytes
 
-    path = module.params.get('path')
-    path = os.path.expanduser(path)
-    follow = module.params.get('follow')
-    get_md5 = module.params.get('get_md5')
-    get_checksum = module.params.get('get_checksum')
 
-    try:
-        if follow:
-            st = os.stat(path)
-        else:
-            st = os.lstat(path)
-    except OSError, e:
-        if e.errno == errno.ENOENT:
-            d = { 'exists' : False }
-            module.exit_json(changed=False, stat=d)
-
-        module.fail_json(msg = e.strerror)
-
+def format_output(module, path, st, follow, get_md5, get_checksum,
+                  checksum_algorithm, mimetype=None, charset=None):
     mode = st.st_mode
 
     # back to ansible
-    d = {
-        'exists'   : True,
-        'path'     : path,
-        'mode'    : "%04o" % S_IMODE(mode),
-        'isdir'    : S_ISDIR(mode),
-        'ischr'    : S_ISCHR(mode),
-        'isblk'    : S_ISBLK(mode),
-        'isreg'    : S_ISREG(mode),
-        'isfifo'   : S_ISFIFO(mode),
-        'islnk'    : S_ISLNK(mode),
-        'issock'   : S_ISSOCK(mode),
-        'uid'      : st.st_uid,
-        'gid'      : st.st_gid,
-        'size'     : st.st_size,
-        'inode'    : st.st_ino,
-        'dev'      : st.st_dev,
-        'nlink'    : st.st_nlink,
-        'atime'    : st.st_atime,
-        'mtime'    : st.st_mtime,
-        'ctime'    : st.st_ctime,
-        'wusr'     : bool(mode & stat.S_IWUSR),
-        'rusr'     : bool(mode & stat.S_IRUSR),
-        'xusr'     : bool(mode & stat.S_IXUSR),
-        'wgrp'     : bool(mode & stat.S_IWGRP),
-        'rgrp'     : bool(mode & stat.S_IRGRP),
-        'xgrp'     : bool(mode & stat.S_IXGRP),
-        'woth'     : bool(mode & stat.S_IWOTH),
-        'roth'     : bool(mode & stat.S_IROTH),
-        'xoth'     : bool(mode & stat.S_IXOTH),
-        'isuid'    : bool(mode & stat.S_ISUID),
-        'isgid'    : bool(mode & stat.S_ISGID),
-        }
+    output = dict(
+        exists=True,
+        path=path,
+        mode="%04o" % stat.S_IMODE(mode),
+        isdir=stat.S_ISDIR(mode),
+        ischr=stat.S_ISCHR(mode),
+        isblk=stat.S_ISBLK(mode),
+        isreg=stat.S_ISREG(mode),
+        isfifo=stat.S_ISFIFO(mode),
+        islnk=stat.S_ISLNK(mode),
+        issock=stat.S_ISSOCK(mode),
+        uid=st.st_uid,
+        gid=st.st_gid,
+        size=st.st_size,
+        inode=st.st_ino,
+        dev=st.st_dev,
+        nlink=st.st_nlink,
+        atime=st.st_atime,
+        mtime=st.st_mtime,
+        ctime=st.st_ctime,
+        wusr=bool(mode & stat.S_IWUSR),
+        rusr=bool(mode & stat.S_IRUSR),
+        xusr=bool(mode & stat.S_IXUSR),
+        wgrp=bool(mode & stat.S_IWGRP),
+        rgrp=bool(mode & stat.S_IRGRP),
+        xgrp=bool(mode & stat.S_IXGRP),
+        woth=bool(mode & stat.S_IWOTH),
+        roth=bool(mode & stat.S_IROTH),
+        xoth=bool(mode & stat.S_IXOTH),
+        isuid=bool(mode & stat.S_ISUID),
+        isgid=bool(mode & stat.S_ISGID),
+        readable=os.access(path, os.R_OK),
+        writeable=os.access(path, os.W_OK),
+        executable=os.access(path, os.X_OK),
+    )
 
-    if S_ISLNK(mode):
-        d['lnk_source'] = os.path.realpath(path)
+    if stat.S_ISLNK(mode):
+        output['lnk_source'] = os.path.realpath(path)
 
-    if S_ISREG(mode) and get_md5 and os.access(path,os.R_OK):
+    if stat.S_ISREG(mode) and get_md5 and os.access(path, os.R_OK):
         # Will fail on FIPS-140 compliant systems
         try:
-            d['md5']       = module.md5(path)
+            output['md5'] = module.md5(path)
         except ValueError:
-            d['md5']       = None
+            output['md5'] = None
 
-    if S_ISREG(mode) and get_checksum and os.access(path,os.R_OK):
-        d['checksum']       = module.sha1(path)
-
+    if stat.S_ISREG(mode) and get_checksum and os.access(path, os.R_OK):
+        output['checksum'] = module.digest_from_file(path, checksum_algorithm)
 
     try:
         pw = pwd.getpwuid(st.st_uid)
 
-        d['pw_name']   = pw.pw_name
+        output['pw_name'] = pw.pw_name
 
-        grp_info = grp.getgrgid(pw.pw_gid)
-        d['gr_name'] = grp_info.gr_name
+        grp_info = grp.getgrgid(st.st_gid)
+        output['gr_name'] = grp_info.gr_name
     except:
         pass
 
+    if not (mimetype is None and charset is None):
+        output['mime_type'] = mimetype
+        output['charset'] = charset
 
-    module.exit_json(changed=False, stat=d)
+    return output
 
-# import module snippets
-from ansible.module_utils.basic import *
 
-main()
+def main():
+    module = AnsibleModule(
+        argument_spec=dict(
+            path=dict(required=True, type='path'),
+            follow=dict(default='no', type='bool'),
+            get_md5=dict(default='yes', type='bool'),
+            get_checksum=dict(default='yes', type='bool'),
+            checksum_algorithm=dict(default='sha1', type='str',
+                                    choices=['sha1', 'sha224', 'sha256', 'sha384', 'sha512'],
+                                    aliases=['checksum_algo', 'checksum']),
+            mime=dict(default=False, type='bool', aliases=['mime_type', 'mime-type']),
+        ),
+        supports_check_mode=True
+    )
+
+    path = module.params.get('path')
+    b_path = to_bytes(path, errors='surrogate_or_strict')
+    follow = module.params.get('follow')
+    get_mime = module.params.get('mime')
+    get_md5 = module.params.get('get_md5')
+    get_checksum = module.params.get('get_checksum')
+    checksum_algorithm = module.params.get('checksum_algorithm')
+
+    try:
+        if follow:
+            st = os.stat(b_path)
+        else:
+            st = os.lstat(b_path)
+    except OSError:
+        e = get_exception()
+        if e.errno == errno.ENOENT:
+            output = {'exists': False}
+            module.exit_json(changed=False, stat=output)
+
+        module.fail_json(msg=e.strerror)
+
+    mimetype = None
+    charset = None
+    if get_mime:
+        mimetype = 'unknown'
+        charset = 'unknown'
+
+        filecmd = [module.get_bin_path('file', True), '-i', path]
+        try:
+            rc, out, err = module.run_command(filecmd)
+            if rc == 0:
+                mimetype, charset = out.split(':')[1].split(';')
+                mimetype = mimetype.strip()
+                charset = charset.split('=')[1].strip()
+        except:
+            pass
+
+    output = format_output(module, path, st, follow, get_md5, get_checksum,
+                           checksum_algorithm, mimetype=mimetype,
+                           charset=charset)
+
+    module.exit_json(changed=False, stat=output)
+
+if __name__ == '__main__':
+    main()

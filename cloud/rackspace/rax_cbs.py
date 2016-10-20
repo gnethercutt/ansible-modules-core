@@ -79,7 +79,9 @@ options:
     description:
       - how long before wait gives up, in seconds
     default: 300
-author: Christopher H. Laco, Matt Martz
+author: 
+    - "Christopher H. Laco (@claco)"
+    - "Matt Martz (@sivel)"
 extends_documentation_fragment: rackspace.openstack
 '''
 
@@ -149,7 +151,7 @@ def cloud_block_storage(module, state, name, description, meta, size,
                                     metadata=meta,
                                     snapshot_id=snapshot_id, **kwargs)
                 changed = True
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg='%s' % e.message)
             else:
                 if wait:
@@ -178,7 +180,7 @@ def cloud_block_storage(module, state, name, description, meta, size,
             try:
                 volume.delete()
                 changed = True
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg='%s' % e.message)
 
     module.exit_json(changed=changed, volume=instance)

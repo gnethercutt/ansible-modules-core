@@ -22,14 +22,15 @@ try:
     except ImportError:
         from quantumclient.quantum import client
     from keystoneclient.v2_0 import client as ksclient
+    HAVE_DEPS = True
 except ImportError:
-    print("failed=True msg='quantumclient (or neutronclient) and keystoneclient are required'")
+    HAVE_DEPS = False
 
 DOCUMENTATION = '''
 ---
 module: quantum_subnet
+deprecated: Deprecated in 2.0. Use os_subnet instead
 version_added: "1.2"
-deprecated: Deprecated in 1.9. Use os_subnet instead
 short_description: Add/remove subnet from a network
 description:
    - Add/remove subnet from a network
@@ -115,7 +116,10 @@ options:
         - From the subnet pool the last IP that should be assigned to the virtual machines
      required: false
      default: None
-requirements: ["quantumclient", "neutronclient", "keystoneclient"]
+requirements:
+    - "python >= 2.6"
+    - "python-neutronclient or python-quantumclient"
+    - "python-keystoneclient"
 '''
 
 EXAMPLES = '''
@@ -135,7 +139,7 @@ def _get_ksclient(module, kwargs):
                                  password=kwargs.get('login_password'),
                                  tenant_name=kwargs.get('login_tenant_name'),
                                  auth_url=kwargs.get('auth_url'))
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error authenticating to the keystone: %s" %e.message)
     global _os_keystone
     _os_keystone = kclient
@@ -145,7 +149,7 @@ def _get_ksclient(module, kwargs):
 def _get_endpoint(module, ksclient):
     try:
         endpoint = ksclient.service_catalog.url_for(service_type='network', endpoint_type='publicURL')
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Error getting network endpoint: %s" % e.message)
     return endpoint
 
@@ -159,23 +163,23 @@ def _get_neutron_client(module, kwargs):
     }
     try:
         neutron = client.Client('2.0', **kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = " Error in connecting to neutron: %s" % e.message)
     return neutron
 
 def _set_tenant_id(module):
     global _os_tenant_id
     if not module.params['tenant_name']:
-        tenant_name = module.params['login_tenant_name']
+        _os_tenant_id = _os_keystone.tenant_id
     else:
         tenant_name = module.params['tenant_name']
 
-    for tenant in _os_keystone.tenants.list():
-        if tenant.name == tenant_name:
-            _os_tenant_id = tenant.id
-            break
+        for tenant in _os_keystone.tenants.list():
+            if tenant.name == tenant_name:
+                _os_tenant_id = tenant.id
+                break
     if not _os_tenant_id:
-            module.fail_json(msg = "The tenant id cannot be found, please check the parameters")
+        module.fail_json(msg = "The tenant id cannot be found, please check the parameters")
 
 def _get_net_id(neutron, module):
     kwargs = {
@@ -184,7 +188,7 @@ def _get_net_id(neutron, module):
     }
     try:
         networks = neutron.list_networks(**kwargs)
-    except Exception, e:
+    except Exception as e:
         module.fail_json("Error in listing neutron networks: %s" % e.message)
     if not networks['networks']:
             return None
@@ -204,7 +208,7 @@ def _get_subnet_id(module, neutron):
         }
         try:
             subnets = neutron.list_subnets(**kwargs)
-        except Exception, e:
+        except Exception as e:
             module.fail_json( msg = " Error in getting the subnet list:%s " % e.message)
         if not subnets['subnets']:
             return None
@@ -238,7 +242,7 @@ def _create_subnet(module, neutron):
         subnet.pop('dns_nameservers')
     try:
         new_subnet = neutron.create_subnet(dict(subnet=subnet))
-    except Exception, e:
+    except Exception as e:
         module.fail_json(msg = "Failure in creating subnet: %s" % e.message)
     return new_subnet['subnet']['id']
 
@@ -246,7 +250,7 @@ def _create_subnet(module, neutron):
 def _delete_subnet(module, neutron, subnet_id):
     try:
         neutron.delete_subnet(subnet_id)
-    except Exception, e:
+    except Exception as e:
         module.fail_json( msg = "Error in deleting subnet: %s" % e.message)
     return True
 
@@ -268,6 +272,9 @@ def main():
             allocation_pool_end     = dict(default=None),
     ))
     module = AnsibleModule(argument_spec=argument_spec)
+    if not HAVE_DEPS:
+        module.fail_json(msg='python-keystoneclient and either python-neutronclient or python-quantumclient are required')
+
     neutron = _get_neutron_client(module, module.params)
     _set_tenant_id(module)
     if module.params['state'] == 'present':
@@ -288,5 +295,6 @@ def main():
 # this is magic, see lib/ansible/module.params['common.py
 from ansible.module_utils.basic import *
 from ansible.module_utils.openstack import *
-main()
+if __name__ == '__main__':
+    main()
 

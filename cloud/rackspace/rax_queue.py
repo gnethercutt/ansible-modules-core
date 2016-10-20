@@ -35,7 +35,9 @@ options:
       - present
       - absent
     default: present
-author: Christopher H. Laco, Matt Martz
+author: 
+    - "Christopher H. Laco (@claco)"
+    - "Matt Martz (@sivel)"
 extends_documentation_fragment: rackspace
 '''
 
@@ -91,7 +93,7 @@ def cloud_queue(module, state, name):
             try:
                 queue = cq.create(name)
                 changed = True
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg='%s' % e.message)
         else:
             queue = queues[0]
@@ -106,7 +108,7 @@ def cloud_queue(module, state, name):
             try:
                 queue.delete()
                 changed = True
-            except Exception, e:
+            except Exception as e:
                 module.fail_json(msg='%s' % e.message)
 
     module.exit_json(changed=changed, queue=instance)
